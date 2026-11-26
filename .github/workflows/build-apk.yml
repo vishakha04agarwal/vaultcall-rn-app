@@ -1,4 +1,4 @@
-﻿name: Build VaultCall Android APK
+name: Build VaultCall Android APK
 
 on:
   workflow_dispatch:
@@ -28,7 +28,9 @@ jobs:
         run: npm install
 
       - name: Prebuild Android native project
-        run: npx expo prebuild --platform android --non-interactive
+        env:
+          CI: "1"
+        run: npx expo prebuild --platform android
 
       - name: Build Debug APK
         run: cd android && ./gradlew assembleDebug
