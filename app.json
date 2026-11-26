@@ -1,39 +1,29 @@
 {
   "expo": {
     "name": "VaultCall",
-    "slug": "vaultcall-app",
+    "slug": "vaultcall-rn",
     "version": "1.0.0",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#020617",
     "splash": {
-      "backgroundColor": "#020617",
-      "resizeMode": "contain"
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#020617"
+    },
+    "android": {
+      "package": "com.vaultcall.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#020617"
+      }
     },
     "plugins": [
-      "./plugins/withVaultCallNative"
+      "./plugins/withVaultCallNative.js"
     ],
-    "android": {
-      "package": "com.vaultcall.rnapp",
-      "versionCode": 1,
-      "adaptiveIcon": {
-        "backgroundColor": "#020617"
-      },
-      "permissions": [
-        "INTERNET",
-        "RECORD_AUDIO",
-        "READ_PHONE_STATE",
-        "READ_CALL_LOG",
-        "READ_CONTACTS",
-        "SYSTEM_ALERT_WINDOW",
-        "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_MICROPHONE"
-      ]
-    },
     "extra": {
-      "backendUrl": "https://vault-backend-t9nu.onrender.com",
       "eas": {
-        "projectId": "00000000-0000-0000-0000-000000000000"
+        "projectId": "vaultcall-rn-expo"
       }
     }
   }
