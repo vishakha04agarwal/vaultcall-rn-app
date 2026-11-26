@@ -1,4 +1,4 @@
-﻿import { NativeModules, PermissionsAndroid, Platform } from "react-native";
+import { NativeModules, PermissionsAndroid, Platform } from "react-native";
 
 const { VaultBridge } = NativeModules;
 
@@ -21,28 +21,49 @@ export async function requestCallAndContactsPermissions() {
 
 export async function checkOverlayPermission() {
   if (!isNativeBridgeAvailable() || typeof VaultBridge.canDrawOverlays !== "function") return false;
-  try { return Boolean(await VaultBridge.canDrawOverlays()); } catch { return false; }
+  try {
+    return Boolean(await VaultBridge.canDrawOverlays());
+  } catch {
+    return false;
+  }
 }
 
 export function openOverlayPermissionSettings() {
   if (!isNativeBridgeAvailable() || typeof VaultBridge.requestOverlayPermission !== "function") return false;
-  try { VaultBridge.requestOverlayPermission(); return true; } catch { return false; }
+  try {
+    VaultBridge.requestOverlayPermission();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function syncVaultExtraContactsToNative(extraContacts = [], autoRecord = false) {
   if (!isNativeBridgeAvailable() || typeof VaultBridge.syncExtraContacts !== "function") return false;
   try {
-    VaultBridge.syncExtraContacts(JSON.stringify(Array.isArray(extraContacts) ? extraContacts : []), Boolean(autoRecord));
+    VaultBridge.syncExtraContacts(
+      JSON.stringify(Array.isArray(extraContacts) ? extraContacts : []),
+      Boolean(autoRecord)
+    );
     return true;
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
 export function triggerNativeCallerPopup(number = "", name = "Unknown Caller", notes = "", sourceLabel = "VaultCall") {
   if (!isNativeBridgeAvailable() || typeof VaultBridge.showNativePopup !== "function") return false;
   try {
-    VaultBridge.showNativePopup(String(number || ""), String(name || "Unknown Caller"), String(notes || ""), String(sourceLabel || "VaultCall"));
+    VaultBridge.showNativePopup(
+      String(number || ""),
+      String(name || "Unknown Caller"),
+      String(notes || ""),
+      String(sourceLabel || "VaultCall")
+    );
     return true;
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
 export async function fetchDevicePhoneContacts() {
@@ -50,7 +71,9 @@ export async function fetchDevicePhoneContacts() {
   try {
     const list = await VaultBridge.getPhoneContacts();
     return Array.isArray(list) ? list : [];
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
 export async function fetchInternalCallLogs() {
@@ -58,5 +81,7 @@ export async function fetchInternalCallLogs() {
   try {
     const list = await VaultBridge.getInternalCallLogs();
     return Array.isArray(list) ? list : [];
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }

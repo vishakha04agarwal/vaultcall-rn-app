@@ -351,7 +351,7 @@ class IncomingCallReceiver : BroadcastReceiver() {
         if (target.isEmpty()) return Triple("Unknown Caller", "", "No Number")
 
         val prefs = context.getSharedPreferences("VaultCallNativePrefs", Context.MODE_PRIVATE)
-        val rawExtra = prefs.getString("vault_extra_contacts", "[]") ?: "[]"
+        val rawExtra = prefs.getString("vault_extra_contacts", "[]") ?: "[]\""
         try {
             val arr = JSONArray(rawExtra)
             for (i in 0 until arr.length()) {
@@ -558,6 +558,37 @@ class VaultPackage : ReactPackage {
   };
 }
 
+function registerVaultPackageInMainApp(appKt) {
+  if (appKt.includes("VaultPackage()")) return appKt;
+  let updated = appKt;
+
+  if (!updated.includes("com.facebook.react.ReactPackage")) {
+    updated = updated.replace(
+      /^(package\s+[^\r\n]+)/m,
+      "$1\n\nimport com.facebook.react.ReactPackage"
+    );
+  }
+
+  if (updated.includes("PackageList(this).packages.apply {")) {
+    updated = updated.replace(
+      "PackageList(this).packages.apply {",
+      "PackageList(this).packages.apply {\n              add(VaultPackage())"
+    );
+  } else if (/override fun getPackages\(\): ArrayList<ReactPackage>\s*=\s*PackageList\(this\)\.packages\.apply\s*\{/.test(updated)) {
+    updated = updated.replace(
+      /(override fun getPackages\(\): ArrayList<ReactPackage>\s*=\s*PackageList\(this\)\.packages\.apply\s*\{)/,
+      "$1\n              add(VaultPackage())"
+    );
+  } else if (/override fun getPackages\(\): List<ReactPackage>\s*=\s*PackageList\(this\)\.packages/.test(updated)) {
+    updated = updated.replace(
+      /override fun getPackages\(\): List<ReactPackage>\s*=\s*PackageList\(this\)\.packages/,
+      "override fun getPackages(): List<ReactPackage> =\n        PackageList(this).packages.apply { add(VaultPackage()) }"
+    );
+  }
+
+  return updated;
+}
+
 module.exports = function withVaultCallNative(config) {
   const pkgName = (config.android && config.android.package) || "com.vaultcall.app";
 
@@ -588,20 +619,10 @@ module.exports = function withVaultCallNative(config) {
 
       const mainAppPath = path.join(pkgDir, "MainApplication.kt");
       if (fs.existsSync(mainAppPath)) {
-        let appKt = fs.readFileSync(mainAppPath, "utf8");
-        if (!appKt.includes("VaultPackage()")) {
-          if (appKt.includes("PackageList(this).packages.apply {")) {
-            appKt = appKt.replace(
-              "PackageList(this).packages.apply {",
-              "PackageList(this).packages.apply {\n              add(VaultPackage())"
-            );
-          } else if (appKt.includes("override fun getPackages(): List<ReactPackage> =")) {
-            appKt = appKt.replace(
-              "override fun getPackages(): List<ReactPackage> =",
-              "override fun getPackages(): List<ReactPackage> =\n        PackageList(this).packages.apply { add(VaultPackage()) } // orig:"
-            );
-          }
-          fs.writeFileSync(mainAppPath, appKt, "utf8");
+        const currentKt = fs.readFileSync(mainAppPath, "utf8");
+        const nextKt = registerVaultPackageInMainApp(currentKt);
+        if (nextKt !== currentKt) {
+          fs.writeFileSync(mainAppPath, nextKt, "utf8");
         }
       }
       return cfg;

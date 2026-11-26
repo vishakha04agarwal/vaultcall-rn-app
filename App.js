@@ -49,6 +49,7 @@ export default function App() {
   const [statusText, setStatusText] = useState("Connecting to VaultCall...");
   const [backendOnline, setBackendOnline] = useState(false);
   const [tab, setTab] = useState("contacts");
+  const [contactSourceFilter, setContactSourceFilter] = useState("all");
   const [profile, setProfile] = useState({ name: "Me", lang: "hi-IN" });
   const [autoRecord, setAutoRecordState] = useState(true);
   const [vaultExtraContacts, setVaultExtraContacts] = useState([]);
@@ -228,19 +229,44 @@ export default function App() {
     return null;
   }, [vaultExtraContacts, phoneContacts, lookupPhone]);
 
+  const displayedContacts = useMemo(() => {
+    const extraItems = (vaultExtraContacts || []).map((c, idx) => ({
+      id: String(c.id || `extra_${c.phone}_${idx}`),
+      name: c.name || "Vault Contact",
+      phone: c.phone || "",
+      notes: c.notes || "",
+      source: "Vault Extra",
+    }));
+    const phoneItems = (phoneContacts || []).map((c, idx) => ({
+      id: `phone_${normalizePhone(c.phone) || idx}_${idx}`,
+      name: c.name || "Phone Contact",
+      phone: c.phone || "",
+      notes: "From your phone contacts",
+      source: "Phone Book",
+    }));
+
+    if (contactSourceFilter === "extra") return extraItems;
+    if (contactSourceFilter === "phone") return phoneItems;
+    return [...extraItems, ...phoneItems];
+  }, [vaultExtraContacts, phoneContacts, contactSourceFilter]);
+
   const handleEnablePhoneIntegration = async () => {
-    await requestCallAndContactsPermissions();
+    const grantedAll = await requestCallAndContactsPermissions();
     const hasOverlay = await checkOverlayPermission();
     setOverlayGranted(hasOverlay);
     await refreshPhoneIntegration(vaultExtraContacts, autoRecord, callLogs);
     await syncWithBackend(apiUrl, vaultExtraContacts, autoRecord);
+    if (!nativeReady) {
+      Alert.alert("Standalone APK Required", "Expo Go mein native call pop-up, phone diary aur call log nahi chalte. GitHub Actions APK install karein.");
+      return;
+    }
     if (!hasOverlay) {
       Alert.alert("Overlay Permission Needed", "Allow 'Display over other apps' for incoming call pop-up.", [
         { text: "Cancel", style: "cancel" },
         { text: "Open Settings", onPress: () => openOverlayPermissionSettings() },
       ]);
     } else {
-      Alert.alert("Integrated", "Phone contacts, call log aur caller pop-up sync ho gaye hain.");
+      Alert.alert("Integrated", grantedAll ? "Permissions, contacts, call log aur overlay sync ho gaye hain." : "Kuch permissions baaki ho sakti hain; App Settings bhi check karein.");
     }
   };
 
@@ -374,10 +400,10 @@ export default function App() {
   const callerSpeakerLabel = matchedCaller ? matchedCaller.name : lookupPhone || "Caller";
 
   const renderContactItem = useCallback(
-    ({ item: c, index }) => (
+    ({ item: c }) => (
       <View style={styles.card}>
         <View style={styles.rowBetween}>
-          <Text style={styles.contactName}>{c.name} (Vault Extra)</Text>
+          <Text style={styles.contactName}>{c.name} ({c.source})</Text>
           <TouchableOpacity style={styles.smallBtn} onPress={() => triggerCallerPopup(c.phone)}>
             <Text style={styles.smallBtnText}>Pop-up</Text>
           </TouchableOpacity>
@@ -442,9 +468,24 @@ export default function App() {
           </View>
           <TouchableOpacity style={styles.secondaryBtn} onPress={() => triggerCallerPopup(lookupPhone)}><Text style={styles.btnText}>Show Call Pop-up</Text></TouchableOpacity>
         </View>
+        <View style={styles.rowGap}>
+          {[
+            ["all", `All (${vaultExtraContacts.length + phoneContacts.length})`],
+            ["extra", `Vault (${vaultExtraContacts.length})`],
+            ["phone", `Phone (${phoneContacts.length})`],
+          ].map(([key, label]) => (
+            <TouchableOpacity
+              key={key}
+              style={[styles.speakerChip, contactSourceFilter === key && styles.speakerChipActive]}
+              onPress={() => setContactSourceFilter(key)}
+            >
+              <Text style={styles.btnText}>{label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
       </View>
     ),
-    [nameInput, phoneInput, tagInput, notesInput, lookupPhone, matchedCaller]
+    [nameInput, phoneInput, tagInput, notesInput, lookupPhone, matchedCaller, vaultExtraContacts.length, phoneContacts.length, contactSourceFilter]
   );
 
   const transcriptsHeader = useMemo(
@@ -518,10 +559,17 @@ export default function App() {
 
       {tab === "contacts" && (
         <FlatList
-          data={vaultExtraContacts}
-          keyExtractor={(c, index) => String(c.id || `${c.phone}_${index}`)}
+          data={displayedContacts}
+          keyExtractor={(c) => c.id}
           renderItem={renderContactItem}
           ListHeaderComponent={contactsHeader}
+          ListEmptyComponent={
+            <View style={styles.card}>
+              <Text style={styles.matchSub}>
+                {nativeReady ? "No contacts found in this filter. Tap Sync & Allow to read Phone Contacts." : "Build and install standalone APK to load Phone Contacts."}
+              </Text>
+            </View>
+          }
           contentContainerStyle={styles.content}
           ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
           initialNumToRender={12}
@@ -552,7 +600,7 @@ export default function App() {
           keyExtractor={(log, logIdx) => String(log.id || `log_${logIdx}`)}
           renderItem={renderLogItem}
           ListHeaderComponent={logsHeader}
-          ListEmptyComponent={<View style={styles.card}><Text style={styles.matchSub}>No call logs found yet. Tap Sync & Allow.</Text></View>}
+          ListEmptyComponent={<View style={styles.card}><Text style={styles.matchSub}>No call logs found yet. Tap Sync & Allow (requires standalone APK).</Text></View>}
           contentContainerStyle={styles.content}
           ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
           initialNumToRender={15}
