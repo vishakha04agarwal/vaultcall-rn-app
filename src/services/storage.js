@@ -9,6 +9,8 @@ const KEYS = {
   TRANSCRIPTS: "@vaultcall_transcripts",
   CALL_LOGS: "@vaultcall_call_logs",
   AUTO_RECORD: "@vaultcall_auto_record",
+  PENDING_CONTACTS: "@vaultcall_pending_contacts",
+  PENDING_TRANSCRIPTS: "@vaultcall_pending_transcripts",
 };
 
 export function normalizePhone(raw = "") {
@@ -16,16 +18,23 @@ export function normalizePhone(raw = "") {
   return digits.length > 10 ? digits.slice(-10) : digits;
 }
 
+function extractListPayload(data) {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.data)) return data.data;
+  if (data && Array.isArray(data.items)) return data.items;
+  if (data && Array.isArray(data.contacts)) return data.contacts;
+  if (data && Array.isArray(data.transcripts)) return data.transcripts;
+  return [];
+}
+
 export async function getBackendUrl() {
   const saved = await AsyncStorage.getItem(KEYS.API_URL);
-  if (!saved || !saved.trim() || saved.includes("localhost")) {
-    return DEFAULT_BACKEND_URL;
-  }
-  return saved.trim().replace(/\/$/, "");
+  if (!saved || !saved.trim() || saved.includes("localhost")) return DEFAULT_BACKEND_URL;
+  return saved.trim().replace(/\/+$/, "");
 }
 
 export async function setBackendUrl(url) {
-  const clean = (url || DEFAULT_BACKEND_URL).trim().replace(/\/$/, "");
+  const clean = (url || DEFAULT_BACKEND_URL).trim().replace(/\/+$/, "") || DEFAULT_BACKEND_URL;
   await AsyncStorage.setItem(KEYS.API_URL, clean);
   return clean;
 }
@@ -34,100 +43,142 @@ export async function getProfile() {
   const raw = await AsyncStorage.getItem(KEYS.PROFILE);
   if (!raw) return { name: "Me", lang: "hi-IN" };
   try {
-    return { name: "Me", lang: "hi-IN", ...JSON.parse(raw) };
+    const p = JSON.parse(raw);
+    return {
+      name: typeof p?.name === "string" && p.name.trim() ? p.name.trim() : "Me",
+      lang: p?.lang === "en-US" ? "en-US" : "hi-IN",
+    };
   } catch {
     return { name: "Me", lang: "hi-IN" };
   }
 }
 
 export async function saveProfile(profile) {
-  await AsyncStorage.setItem(KEYS.PROFILE, JSON.stringify(profile));
+  const clean = {
+    name: typeof profile?.name === "string" && profile.name.trim() ? profile.name.trim() : "Me",
+    lang: profile?.lang === "en-US" ? "en-US" : "hi-IN",
+  };
+  await AsyncStorage.setItem(KEYS.PROFILE, JSON.stringify(clean));
+  return clean;
 }
 
 export async function getAutoRecord() {
-  const raw = await AsyncStorage.getItem(KEYS.AUTO_RECORD);
-  return raw === "true";
+  return (await AsyncStorage.getItem(KEYS.AUTO_RECORD)) === "true";
 }
 
 export async function setAutoRecord(val) {
   await AsyncStorage.setItem(KEYS.AUTO_RECORD, val ? "true" : "false");
 }
 
-export async function getCachedContacts() {
-  const raw = await AsyncStorage.getItem(KEYS.CONTACTS);
+async function readArr(key) {
+  const raw = await AsyncStorage.getItem(key);
+  if (!raw) return [];
   try {
-    const arr = raw ? JSON.parse(raw) : [];
-    return Array.isArray(arr) ? arr : [];
+    const p = JSON.parse(raw);
+    return Array.isArray(p) ? p : [];
   } catch {
     return [];
   }
 }
 
-export async function saveCachedContacts(list) {
-  await AsyncStorage.setItem(KEYS.CONTACTS, JSON.stringify(list || []));
+async function writeArr(key, arr) {
+  await AsyncStorage.setItem(key, JSON.stringify(Array.isArray(arr) ? arr : []));
 }
 
-export async function getCachedTranscripts() {
-  const raw = await AsyncStorage.getItem(KEYS.TRANSCRIPTS);
-  try {
-    const arr = raw ? JSON.parse(raw) : [];
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
-}
-
-export async function saveCachedTranscripts(list) {
-  await AsyncStorage.setItem(KEYS.TRANSCRIPTS, JSON.stringify(list || []));
-}
-
-export async function getCallLogs() {
-  const raw = await AsyncStorage.getItem(KEYS.CALL_LOGS);
-  try {
-    const arr = raw ? JSON.parse(raw) : [];
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
-}
+export const getCachedContacts = () => readArr(KEYS.CONTACTS);
+export const saveCachedContacts = (list) => writeArr(KEYS.CONTACTS, list);
+export const getCachedTranscripts = () => readArr(KEYS.TRANSCRIPTS);
+export const saveCachedTranscripts = (list) => writeArr(KEYS.TRANSCRIPTS, list);
+export const getCallLogs = () => readArr(KEYS.CALL_LOGS);
+export const saveCallLogs = (list) => writeArr(KEYS.CALL_LOGS, (Array.isArray(list) ? list : []).slice(0, 150));
 
 export async function appendCallLog(entry) {
-  const current = await getCallLogs();
-  const next = [entry, ...current].slice(0, 100);
-  await AsyncStorage.setItem(KEYS.CALL_LOGS, JSON.stringify(next));
+  const next = [entry, ...(await getCallLogs())].slice(0, 150);
+  await saveCallLogs(next);
   return next;
 }
 
+export const getPendingContacts = () => readArr(KEYS.PENDING_CONTACTS);
+export const savePendingContacts = (list) => writeArr(KEYS.PENDING_CONTACTS, list);
+export async function queuePendingContact(c) {
+  const next = [c, ...(await getPendingContacts())];
+  await savePendingContacts(next);
+  return next;
+}
+
+export const getPendingTranscripts = () => readArr(KEYS.PENDING_TRANSCRIPTS);
+export const savePendingTranscripts = (list) => writeArr(KEYS.PENDING_TRANSCRIPTS, list);
+export async function queuePendingTranscript(t) {
+  const next = [t, ...(await getPendingTranscripts())];
+  await savePendingTranscripts(next);
+  return next;
+}
+
+async function fetchTimeout(url, opts = {}, ms = 12000) {
+  const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const t = ctrl ? setTimeout(() => ctrl.abort(), ms) : null;
+  try {
+    return await fetch(url, { ...opts, signal: ctrl ? ctrl.signal : undefined });
+  } finally {
+    if (t) clearTimeout(t);
+  }
+}
+
 export async function fetchContactsRemote(baseUrl) {
-  const res = await fetch(`${baseUrl}/api/v1/contacts`);
+  const clean = (baseUrl || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
+  const res = await fetchTimeout(`${clean}/api/v1/contacts`);
   if (!res.ok) throw new Error(`Contacts fetch failed (${res.status})`);
-  const data = await res.json();
-  return Array.isArray(data) ? data : [];
+  return extractListPayload(await res.json());
 }
 
 export async function createContactRemote(baseUrl, contact) {
-  const res = await fetch(`${baseUrl}/api/v1/contacts`, {
+  const clean = (baseUrl || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
+  const res = await fetchTimeout(`${clean}/api/v1/contacts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(contact),
   });
   if (!res.ok) throw new Error(`Contact save failed (${res.status})`);
-  return res.json();
+  const d = await res.json();
+  return d && d.data && !Array.isArray(d.data) ? d.data : d;
 }
 
 export async function fetchTranscriptsRemote(baseUrl) {
-  const res = await fetch(`${baseUrl}/api/v1/transcripts`);
+  const clean = (baseUrl || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
+  const res = await fetchTimeout(`${clean}/api/v1/transcripts`);
   if (!res.ok) throw new Error(`Transcripts fetch failed (${res.status})`);
-  const data = await res.json();
-  return Array.isArray(data) ? data : [];
+  return extractListPayload(await res.json());
 }
 
 export async function createTranscriptRemote(baseUrl, transcript) {
-  const res = await fetch(`${baseUrl}/api/v1/transcripts`, {
+  const clean = (baseUrl || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
+  const res = await fetchTimeout(`${clean}/api/v1/transcripts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(transcript),
   });
   if (!res.ok) throw new Error(`Transcript save failed (${res.status})`);
-  return res.json();
+  const d = await res.json();
+  return d && d.data && !Array.isArray(d.data) ? d.data : d;
+}
+
+export async function flushPendingQueue(baseUrl) {
+  const clean = (baseUrl || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
+  const pendingC = await getPendingContacts();
+  const remC = [];
+  let syncedC = 0;
+  for (const item of pendingC) {
+    try { await createContactRemote(clean, item); syncedC += 1; } catch { remC.push(item); }
+  }
+  await savePendingContacts(remC);
+
+  const pendingT = await getPendingTranscripts();
+  const remT = [];
+  let syncedT = 0;
+  for (const tx of pendingT) {
+    try { await createTranscriptRemote(clean, tx); syncedT += 1; } catch { remT.push(tx); }
+  }
+  await savePendingTranscripts(remT);
+
+  return { syncedContactsCount: syncedC, syncedTranscriptsCount: syncedT };
 }

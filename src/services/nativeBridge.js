@@ -1,4 +1,4 @@
-import { NativeModules, PermissionsAndroid, Platform } from "react-native";
+﻿import { NativeModules, PermissionsAndroid, Platform } from "react-native";
 
 const { VaultBridge } = NativeModules;
 
@@ -13,54 +13,50 @@ export async function requestCallAndContactsPermissions() {
     PermissionsAndroid.PERMISSIONS.READ_CALL_LOG,
     PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
     PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-  ];
+  ].filter(Boolean);
+  if (!perms.length) return false;
   const res = await PermissionsAndroid.requestMultiple(perms);
   return Object.values(res).every((v) => v === PermissionsAndroid.RESULTS.GRANTED);
 }
 
 export async function checkOverlayPermission() {
-  if (!isNativeBridgeAvailable() || typeof VaultBridge.canDrawOverlays !== "function") {
-    return false;
-  }
-  return VaultBridge.canDrawOverlays();
+  if (!isNativeBridgeAvailable() || typeof VaultBridge.canDrawOverlays !== "function") return false;
+  try { return Boolean(await VaultBridge.canDrawOverlays()); } catch { return false; }
 }
 
 export function openOverlayPermissionSettings() {
-  if (isNativeBridgeAvailable() && typeof VaultBridge.requestOverlayPermission === "function") {
-    VaultBridge.requestOverlayPermission();
-  }
+  if (!isNativeBridgeAvailable() || typeof VaultBridge.requestOverlayPermission !== "function") return false;
+  try { VaultBridge.requestOverlayPermission(); return true; } catch { return false; }
 }
 
 export function syncVaultExtraContactsToNative(extraContacts = [], autoRecord = false) {
-  if (!isNativeBridgeAvailable() || typeof VaultBridge.syncExtraContacts !== "function") return;
+  if (!isNativeBridgeAvailable() || typeof VaultBridge.syncExtraContacts !== "function") return false;
   try {
-    VaultBridge.syncExtraContacts(JSON.stringify(extraContacts || []), Boolean(autoRecord));
-  } catch {}
+    VaultBridge.syncExtraContacts(JSON.stringify(Array.isArray(extraContacts) ? extraContacts : []), Boolean(autoRecord));
+    return true;
+  } catch { return false; }
 }
 
 export function triggerNativeCallerPopup(number = "", name = "Unknown Caller", notes = "", sourceLabel = "VaultCall") {
   if (!isNativeBridgeAvailable() || typeof VaultBridge.showNativePopup !== "function") return false;
-  VaultBridge.showNativePopup(
-    String(number || ""),
-    String(name || "Unknown Caller"),
-    String(notes || ""),
-    String(sourceLabel || "VaultCall")
-  );
-  return true;
+  try {
+    VaultBridge.showNativePopup(String(number || ""), String(name || "Unknown Caller"), String(notes || ""), String(sourceLabel || "VaultCall"));
+    return true;
+  } catch { return false; }
 }
 
 export async function fetchDevicePhoneContacts() {
-  if (!isNativeBridgeAvailable() || typeof VaultBridge.getPhoneContacts !== "function") {
-    return [];
-  }
-  const list = await VaultBridge.getPhoneContacts();
-  return Array.isArray(list) ? list : [];
+  if (!isNativeBridgeAvailable() || typeof VaultBridge.getPhoneContacts !== "function") return [];
+  try {
+    const list = await VaultBridge.getPhoneContacts();
+    return Array.isArray(list) ? list : [];
+  } catch { return []; }
 }
 
 export async function fetchInternalCallLogs() {
-  if (!isNativeBridgeAvailable() || typeof VaultBridge.getInternalCallLogs !== "function") {
-    return [];
-  }
-  const list = await VaultBridge.getInternalCallLogs();
-  return Array.isArray(list) ? list : [];
+  if (!isNativeBridgeAvailable() || typeof VaultBridge.getInternalCallLogs !== "function") return [];
+  try {
+    const list = await VaultBridge.getInternalCallLogs();
+    return Array.isArray(list) ? list : [];
+  } catch { return []; }
 }
