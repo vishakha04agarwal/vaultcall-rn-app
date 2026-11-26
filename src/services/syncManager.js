@@ -1,11 +1,10 @@
 import {
   SECURITY_CONSTANTS,
-  getBackendBaseUrl,
   buildSecureHeaders,
+  normalizeAndValidateUrl,
 } from "../config/security";
 
-// Debounce helper to avoid rapid repeated calls & UI lag
-export function debounce(fn, waitMs = 300) {
+export function debounce(fn, waitMs = 250) {
   let timerId = null;
   return (...args) => {
     if (timerId) clearTimeout(timerId);
@@ -15,50 +14,46 @@ export function debounce(fn, waitMs = 300) {
   };
 }
 
-// Fetch with timeout & AbortController so slow/dead network doesn't hang UI
 export async function fetchWithTimeout(url, options = {}, timeoutMs = SECURITY_CONSTANTS.REQUEST_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timerId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
-    const response = await fetch(url, {
+    return await fetch(url, {
       ...options,
-      signal: controller.signal,
+      signal: controller ? controller.signal : undefined,
     });
-    return response;
   } finally {
-    clearTimeout(id);
+    if (timerId) clearTimeout(timerId);
   }
 }
 
-export async function checkBackendHealth(authToken = "") {
-  const baseUrl = getBackendBaseUrl();
-  if (!baseUrl) {
-    return {
-      ok: false,
-      reason: "MISSING_BACKEND_URL",
-      message: "EXPO_PUBLIC_API_URL set nahi hai.",
-    };
+export async function checkBackendHealth(baseUrl, authToken = "") {
+  const cleanUrl = normalizeAndValidateUrl(baseUrl, "");
+  if (!cleanUrl) {
+    return { ok: false, status: 0, message: "Invalid Backend URL" };
   }
 
-  try {
-    const res = await fetchWithTimeout(`${baseUrl}/health`, {
-      method: "GET",
-      headers: buildSecureHeaders({}, authToken),
-    }, 6000);
-
-    return {
-      ok: res.ok,
-      status: res.status,
-      message: res.ok ? "Backend connected" : `Backend error (${res.status})`,
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      reason: err?.name === "AbortError" ? "TIMEOUT" : "NETWORK_ERROR",
-      message: err?.message || "Backend se connect nahi ho pa raha.",
-    };
+  for (const healthPath of ["/health", "/api/v1/health"]) {
+    try {
+      const res = await fetchWithTimeout(
+        `${cleanUrl}${healthPath}`,
+        { method: "GET", headers: buildSecureHeaders({}, authToken) },
+        SECURITY_CONSTANTS.HEALTH_TIMEOUT_MS
+      );
+      if (res.ok) {
+        return { ok: true, status: res.status, message: "Backend Online" };
+      }
+      if (res.status !== 404) {
+        return { ok: false, status: res.status, message: `Backend HTTP ${res.status}` };
+      }
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        return { ok: false, status: 0, message: "Backend Timeout (Waking up / Slow)" };
+      }
+    }
   }
+
+  return { ok: false, status: 404, message: "Health endpoint not reachable" };
 }
 
 export class OfflineSyncEngine {
@@ -85,44 +80,36 @@ export class OfflineSyncEngine {
     }
   }
 
-  async enqueue(action) {
+  async enqueue(item) {
     const queue = (await this.readQueue()) || [];
     const entry = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      createdAt: new Date().toISOString(),
-      retries: 0,
-      status: "pending",
-      ...action,
+      _queueId: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      _retries: 0,
+      ...item,
     };
-    queue.push(entry);
-    await this.writeQueue(queue);
-    this.onStateChange({ pendingCount: queue.length, isSyncing: this.isSyncing });
-
-    // Try immediate background flush without blocking UI
-    this.flushQueue().catch(() => {});
+    const next = [entry, ...queue];
+    await this.writeQueue(next);
+    this.onStateChange({ pendingCount: next.length, isSyncing: this.isSyncing });
     return entry;
   }
 
   async flushQueue() {
-    if (this.isSyncing) return;
-    const baseUrl = getBackendBaseUrl();
-    if (!baseUrl) return;
-
+    if (this.isSyncing) return { syncedCount: 0, remainingCount: ((await this.readQueue()) || []).length };
     this.isSyncing = true;
-    let queue = (await this.readQueue()) || [];
-    this.onStateChange({ pendingCount: queue.length, isSyncing: true });
+    const initialQueue = (await this.readQueue()) || [];
+    this.onStateChange({ pendingCount: initialQueue.length, isSyncing: true });
 
+    let syncedCount = 0;
     const remaining = [];
-    for (let i = 0; i < queue.length; i++) {
-      const item = queue[i];
+
+    for (const item of initialQueue) {
       try {
-        await this.pushItem(baseUrl, item);
+        await this.pushItem(item);
+        syncedCount += 1;
       } catch {
-        const nextRetries = (item.retries || 0) + 1;
+        const nextRetries = (item._retries || 0) + 1;
         if (nextRetries <= SECURITY_CONSTANTS.MAX_RETRY_ATTEMPTS) {
-          remaining.push({ ...item, retries: nextRetries, status: "failed" });
-        } else {
-          remaining.push({ ...item, retries: nextRetries, status: "dead_letter" });
+          remaining.push({ ...item, _retries: nextRetries });
         }
       }
     }
@@ -130,5 +117,6 @@ export class OfflineSyncEngine {
     await this.writeQueue(remaining);
     this.isSyncing = false;
     this.onStateChange({ pendingCount: remaining.length, isSyncing: false });
+    return { syncedCount, remainingCount: remaining.length };
   }
 }

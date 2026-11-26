@@ -1,6 +1,13 @@
-﻿import AsyncStorage from "@react-native-async-storage/async-storage";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import {
+  SECURITY_CONSTANTS,
+  buildSecureHeaders,
+  getEnvBackendUrl,
+  normalizeAndValidateUrl,
+} from "../config/security";
+import { fetchWithTimeout } from "./syncManager";
 
-export const DEFAULT_BACKEND_URL = "https://vault-backend-t9nu.onrender.com";
+export const DEFAULT_BACKEND_URL = getEnvBackendUrl("https://vault-backend-t9nu.onrender.com");
 
 const KEYS = {
   API_URL: "@vaultcall_api_url",
@@ -29,12 +36,11 @@ function extractListPayload(data) {
 
 export async function getBackendUrl() {
   const saved = await AsyncStorage.getItem(KEYS.API_URL);
-  if (!saved || !saved.trim() || saved.includes("localhost")) return DEFAULT_BACKEND_URL;
-  return saved.trim().replace(/\/+$/, "");
+  return normalizeAndValidateUrl(saved, DEFAULT_BACKEND_URL);
 }
 
 export async function setBackendUrl(url) {
-  const clean = (url || DEFAULT_BACKEND_URL).trim().replace(/\/+$/, "") || DEFAULT_BACKEND_URL;
+  const clean = normalizeAndValidateUrl(url, DEFAULT_BACKEND_URL);
   await AsyncStorage.setItem(KEYS.API_URL, clean);
   return clean;
 }
@@ -101,7 +107,8 @@ export async function appendCallLog(entry) {
 export const getPendingContacts = () => readArr(KEYS.PENDING_CONTACTS);
 export const savePendingContacts = (list) => writeArr(KEYS.PENDING_CONTACTS, list);
 export async function queuePendingContact(c) {
-  const next = [c, ...(await getPendingContacts())];
+  const { _queueId, _retries, ...clean } = c || {};
+  const next = [clean, ...(await getPendingContacts())];
   await savePendingContacts(next);
   return next;
 }
@@ -109,61 +116,70 @@ export async function queuePendingContact(c) {
 export const getPendingTranscripts = () => readArr(KEYS.PENDING_TRANSCRIPTS);
 export const savePendingTranscripts = (list) => writeArr(KEYS.PENDING_TRANSCRIPTS, list);
 export async function queuePendingTranscript(t) {
-  const next = [t, ...(await getPendingTranscripts())];
+  const { _queueId, _retries, ...clean } = t || {};
+  const next = [clean, ...(await getPendingTranscripts())];
   await savePendingTranscripts(next);
   return next;
 }
 
-async function fetchTimeout(url, opts = {}, ms = 12000) {
-  const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-  const t = ctrl ? setTimeout(() => ctrl.abort(), ms) : null;
-  try {
-    return await fetch(url, { ...opts, signal: ctrl ? ctrl.signal : undefined });
-  } finally {
-    if (t) clearTimeout(t);
-  }
-}
-
 export async function fetchContactsRemote(baseUrl) {
-  const clean = (baseUrl || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
-  const res = await fetchTimeout(`${clean}/api/v1/contacts`);
+  const clean = normalizeAndValidateUrl(baseUrl, DEFAULT_BACKEND_URL);
+  const res = await fetchWithTimeout(
+    `${clean}/api/v1/contacts`,
+    { method: "GET", headers: buildSecureHeaders() },
+    SECURITY_CONSTANTS.REQUEST_TIMEOUT_MS
+  );
   if (!res.ok) throw new Error(`Contacts fetch failed (${res.status})`);
   return extractListPayload(await res.json());
 }
 
 export async function createContactRemote(baseUrl, contact) {
-  const clean = (baseUrl || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
-  const res = await fetchTimeout(`${clean}/api/v1/contacts`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(contact),
-  });
+  const clean = normalizeAndValidateUrl(baseUrl, DEFAULT_BACKEND_URL);
+  const { _queueId, _retries, ...payload } = contact || {};
+  const res = await fetchWithTimeout(
+    `${clean}/api/v1/contacts`,
+    {
+      method: "POST",
+      headers: buildSecureHeaders(),
+      body: JSON.stringify(payload),
+    },
+    SECURITY_CONSTANTS.REQUEST_TIMEOUT_MS
+  );
   if (!res.ok) throw new Error(`Contact save failed (${res.status})`);
   const d = await res.json();
   return d && d.data && !Array.isArray(d.data) ? d.data : d;
 }
 
 export async function fetchTranscriptsRemote(baseUrl) {
-  const clean = (baseUrl || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
-  const res = await fetchTimeout(`${clean}/api/v1/transcripts`);
+  const clean = normalizeAndValidateUrl(baseUrl, DEFAULT_BACKEND_URL);
+  const res = await fetchWithTimeout(
+    `${clean}/api/v1/transcripts`,
+    { method: "GET", headers: buildSecureHeaders() },
+    SECURITY_CONSTANTS.REQUEST_TIMEOUT_MS
+  );
   if (!res.ok) throw new Error(`Transcripts fetch failed (${res.status})`);
   return extractListPayload(await res.json());
 }
 
 export async function createTranscriptRemote(baseUrl, transcript) {
-  const clean = (baseUrl || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
-  const res = await fetchTimeout(`${clean}/api/v1/transcripts`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(transcript),
-  });
+  const clean = normalizeAndValidateUrl(baseUrl, DEFAULT_BACKEND_URL);
+  const { _queueId, _retries, ...payload } = transcript || {};
+  const res = await fetchWithTimeout(
+    `${clean}/api/v1/transcripts`,
+    {
+      method: "POST",
+      headers: buildSecureHeaders(),
+      body: JSON.stringify(payload),
+    },
+    SECURITY_CONSTANTS.REQUEST_TIMEOUT_MS
+  );
   if (!res.ok) throw new Error(`Transcript save failed (${res.status})`);
   const d = await res.json();
   return d && d.data && !Array.isArray(d.data) ? d.data : d;
 }
 
 export async function flushPendingQueue(baseUrl) {
-  const clean = (baseUrl || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
+  const clean = normalizeAndValidateUrl(baseUrl, DEFAULT_BACKEND_URL);
   const pendingC = await getPendingContacts();
   const remC = [];
   let syncedC = 0;

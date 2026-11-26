@@ -38,9 +38,17 @@ jobs:
           const fs = require("fs");
           const p = "android/app/build.gradle";
           let g = fs.readFileSync(p, "utf8");
-          if (g.includes("buildTypes {") && g.includes("signingConfigs") && !/release\s*\{[\s\S]*?signingConfig/.test(g)) {
-            g = g.replace(/buildTypes\s*\{([\s\S]*?)release\s*\{/, (m, mid) => `buildTypes {${mid}release {\n            signingConfig signingConfigs.debug`);
-            fs.writeFileSync(p, g, "utf8");
+          const btIdx = g.indexOf("buildTypes");
+          if (btIdx !== -1 && g.includes("signingConfigs")) {
+            const before = g.slice(0, btIdx);
+            let after = g.slice(btIdx);
+            if (/release\s*\{[\s\S]*?signingConfig\s+signingConfigs\.release/.test(after) && !/release\s*\{[\s\S]*?signingConfig\s+signingConfigs\.debug/.test(after)) {
+              after = after.replace(/(release\s*\{[\s\S]*?)signingConfig\s+signingConfigs\.release/, "$1signingConfig signingConfigs.debug");
+              fs.writeFileSync(p, before + after, "utf8");
+            } else if (/release\s*\{/.test(after) && !/release\s*\{[\s\S]*?signingConfig/.test(after)) {
+              after = after.replace(/(release\s*\{)/, "$1\n            signingConfig signingConfigs.debug");
+              fs.writeFileSync(p, before + after, "utf8");
+            }
           }
           '
 
