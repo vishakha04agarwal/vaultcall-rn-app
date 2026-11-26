@@ -10,6 +10,9 @@
       "backgroundColor": "#020617",
       "resizeMode": "contain"
     },
+    "plugins": [
+      "./plugins/withVaultCallNative"
+    ],
     "android": {
       "package": "com.vaultcall.rnapp",
       "versionCode": 1,
@@ -21,7 +24,10 @@
         "RECORD_AUDIO",
         "READ_PHONE_STATE",
         "READ_CALL_LOG",
-        "SYSTEM_ALERT_WINDOW"
+        "READ_CONTACTS",
+        "SYSTEM_ALERT_WINDOW",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_MICROPHONE"
       ]
     },
     "extra": {
