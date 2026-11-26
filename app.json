@@ -1,0 +1,30 @@
+﻿{
+  "expo": {
+    "name": "VaultCall",
+    "slug": "vaultcall-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#020617",
+    "android": {
+      "package": "com.vaultcall.rnapp",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "backgroundColor": "#020617"
+      },
+      "permissions": [
+        "INTERNET",
+        "RECORD_AUDIO",
+        "READ_PHONE_STATE",
+        "READ_CALL_LOG",
+        "SYSTEM_ALERT_WINDOW"
+      ]
+    },
+    "extra": {
+      "backendUrl": "https://vault-backend-t9nu.onrender.com",
+      "eas": {
+        "projectId": "00000000-0000-0000-0000-000000000000"
+      }
+    }
+  }
+}
