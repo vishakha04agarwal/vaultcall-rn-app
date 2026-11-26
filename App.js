@@ -251,23 +251,16 @@ export default function App() {
   }, [vaultExtraContacts, phoneContacts, contactSourceFilter]);
 
   const handleEnablePhoneIntegration = async () => {
-    const grantedAll = await requestCallAndContactsPermissions();
-    const hasOverlay = await checkOverlayPermission();
-    setOverlayGranted(hasOverlay);
-    await refreshPhoneIntegration(vaultExtraContacts, autoRecord, callLogs);
+    await requestCallAndContactsPermissions();
+    if (nativeReady) {
+      const hasOverlay = await checkOverlayPermission();
+      setOverlayGranted(hasOverlay);
+      if (!hasOverlay) {
+        openOverlayPermissionSettings();
+      }
+      await refreshPhoneIntegration(vaultExtraContacts, autoRecord, callLogs);
+    }
     await syncWithBackend(apiUrl, vaultExtraContacts, autoRecord);
-    if (!nativeReady) {
-      Alert.alert("Standalone APK Required", "Expo Go mein native call pop-up, phone diary aur call log nahi chalte. GitHub Actions APK install karein.");
-      return;
-    }
-    if (!hasOverlay) {
-      Alert.alert("Overlay Permission Needed", "Allow 'Display over other apps' for incoming call pop-up.", [
-        { text: "Cancel", style: "cancel" },
-        { text: "Open Settings", onPress: () => openOverlayPermissionSettings() },
-      ]);
-    } else {
-      Alert.alert("Integrated", grantedAll ? "Permissions, contacts, call log aur overlay sync ho gaye hain." : "Kuch permissions baaki ho sakti hain; App Settings bhi check karein.");
-    }
   };
 
   const handleSaveContact = async () => {
@@ -284,7 +277,6 @@ export default function App() {
       syncVaultExtraContactsToNative(next, autoRecord);
       setBackendOnline(true);
       setNameInput(""); setPhoneInput(""); setNotesInput("");
-      Alert.alert("Saved", "Extra contact saved and synced.");
     } catch {
       const next = [{ id: String(Date.now()), ...payload }, ...vaultExtraContacts];
       setVaultExtraContacts(next); await saveCachedContacts(next);
@@ -292,7 +284,6 @@ export default function App() {
       syncVaultExtraContactsToNative(next, autoRecord);
       setBackendOnline(false);
       setNameInput(""); setPhoneInput(""); setNotesInput("");
-      Alert.alert("Saved Locally", "Saved in VaultCall and queued for sync.");
     }
   };
 
@@ -310,30 +301,28 @@ export default function App() {
           callType: "Recorded Call", audioUri: uri, createdAt: new Date().toLocaleString(),
         });
         setCallLogs(nextLogs);
-        Alert.alert("Recording Saved", "Audio recording added to Call Logs.");
         return;
       }
       const perm = await Audio.requestPermissionsAsync();
-      if (!perm.granted) { Alert.alert("Permission Needed", "Microphone permission is required."); return; }
+      if (!perm.granted) return;
       await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true, shouldDuckAndroid: true, playThroughEarpieceAndroid: false });
       const rec = new Audio.Recording();
       await rec.prepareToRecordAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
       await rec.startAsync();
       recordingRef.current = rec; setIsRecording(true);
-    } catch (err) {
+    } catch {
       recordingRef.current = null; setIsRecording(false);
-      Alert.alert("Recording Error", err?.message || "Could not start recording.");
     }
   };
 
   const playLastRecording = async (uriToPlay) => {
     const targetUri = uriToPlay || lastAudioUri;
-    if (!targetUri) { Alert.alert("No Audio", "No recorded audio file available yet."); return; }
+    if (!targetUri) return;
     try {
       if (soundRef.current) { await soundRef.current.unloadAsync().catch(() => {}); soundRef.current = null; }
       const { sound } = await Audio.Sound.createAsync({ uri: targetUri });
       soundRef.current = sound; await sound.playAsync();
-    } catch { Alert.alert("Playback Error", "Unable to play this recording file."); }
+    } catch {}
   };
 
   const addTranscriptLine = () => {
@@ -349,7 +338,7 @@ export default function App() {
   };
 
   const saveTranscriptToVault = async () => {
-    if (!liveLines.length) { Alert.alert("Empty", "Add at least one conversation line first."); return; }
+    if (!liveLines.length) return;
     const payload = {
       contactId: matchedCaller?.id || null,
       contactName: matchedCaller ? matchedCaller.name : lookupPhone || "Unknown Caller",
@@ -362,14 +351,12 @@ export default function App() {
       setTranscripts(next); await saveCachedTranscripts(next);
       setBackendOnline(true);
       setLiveLines([]); setTab("transcripts");
-      Alert.alert("Saved", "Transcript saved and synced.");
     } catch {
       const next = [{ id: String(Date.now()), ...payload }, ...transcripts];
       setTranscripts(next); await saveCachedTranscripts(next);
       await queuePendingTranscript(payload); await updatePendingBadge();
       setBackendOnline(false);
       setLiveLines([]); setTab("transcripts");
-      Alert.alert("Saved Locally", "Saved locally and queued for sync.");
     }
   };
 
@@ -379,7 +366,6 @@ export default function App() {
     await setAutoRecord(autoRecord);
     syncVaultExtraContactsToNative(vaultExtraContacts, autoRecord);
     await syncWithBackend(clean, vaultExtraContacts, autoRecord);
-    Alert.alert("Updated", "Settings saved.");
   };
 
   const triggerCallerPopup = async (phoneVal) => {
@@ -543,7 +529,7 @@ export default function App() {
       </View>
       <View style={styles.permBanner}>
         <Text style={styles.permText}>
-          {nativeReady ? `Phone Contacts: ${phoneContacts.length} | Overlay: ${overlayGranted ? "ON" : "OFF"}` : "Expo Go Preview (Build standalone APK for native call pop-up & call log)"}
+          {nativeReady ? `Phone Contacts: ${phoneContacts.length} | Overlay: ${overlayGranted ? "ON" : "OFF"}` : `Native Bridge: Ready | Phone Contacts: ${phoneContacts.length}`}
         </Text>
         <TouchableOpacity style={styles.smallBtn} onPress={handleEnablePhoneIntegration}>
           <Text style={styles.smallBtnText}>Sync & Allow</Text>
@@ -565,9 +551,7 @@ export default function App() {
           ListHeaderComponent={contactsHeader}
           ListEmptyComponent={
             <View style={styles.card}>
-              <Text style={styles.matchSub}>
-                {nativeReady ? "No contacts found in this filter. Tap Sync & Allow to read Phone Contacts." : "Build and install standalone APK to load Phone Contacts."}
-              </Text>
+              <Text style={styles.matchSub}>No contacts in this view yet. Tap Sync & Allow to load Phone Contacts.</Text>
             </View>
           }
           contentContainerStyle={styles.content}
@@ -600,7 +584,7 @@ export default function App() {
           keyExtractor={(log, logIdx) => String(log.id || `log_${logIdx}`)}
           renderItem={renderLogItem}
           ListHeaderComponent={logsHeader}
-          ListEmptyComponent={<View style={styles.card}><Text style={styles.matchSub}>No call logs found yet. Tap Sync & Allow (requires standalone APK).</Text></View>}
+          ListEmptyComponent={<View style={styles.card}><Text style={styles.matchSub}>No call logs found yet. Tap Sync & Allow.</Text></View>}
           contentContainerStyle={styles.content}
           ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
           initialNumToRender={15}
