@@ -351,7 +351,7 @@ class IncomingCallReceiver : BroadcastReceiver() {
         if (target.isEmpty()) return Triple("Unknown Caller", "", "No Number")
 
         val prefs = context.getSharedPreferences("VaultCallNativePrefs", Context.MODE_PRIVATE)
-        val rawExtra = prefs.getString("vault_extra_contacts", "[]") ?: "[]\""
+        val rawExtra = prefs.getString("vault_extra_contacts", "[]") ?: "[]"
         try {
             val arr = JSONArray(rawExtra)
             for (i in 0 until arr.length()) {
