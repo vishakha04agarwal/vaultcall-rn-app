@@ -1,4 +1,5 @@
-import { NativeModules, PermissionsAndroid, Platform } from "react-native";
+import { Linking, NativeModules, PermissionsAndroid, Platform } from "react-native";
+import * as Contacts from "expo-contacts";
 
 const { VaultBridge } = NativeModules;
 
@@ -8,6 +9,9 @@ export function isNativeBridgeAvailable() {
 
 export async function requestCallAndContactsPermissions() {
   if (Platform.OS !== "android") return false;
+  try {
+    await Contacts.requestPermissionsAsync();
+  } catch {}
   const perms = [
     PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE,
     PermissionsAndroid.PERMISSIONS.READ_CALL_LOG,
@@ -27,8 +31,19 @@ export async function checkOverlayPermission() {
 }
 
 export function openOverlayPermissionSettings() {
-  if (!isNativeBridgeAvailable() || typeof VaultBridge.requestOverlayPermission !== "function") return false;
-  try { VaultBridge.requestOverlayPermission(); return true; } catch { return false; }
+  if (isNativeBridgeAvailable() && typeof VaultBridge.requestOverlayPermission === "function") {
+    try { VaultBridge.requestOverlayPermission(); return true; } catch {}
+  }
+  Linking.openSettings().catch(() => {});
+  return false;
+}
+
+export function openPhoneAppDetailsSettings() {
+  if (isNativeBridgeAvailable() && typeof VaultBridge.openAppSettings === "function") {
+    try { VaultBridge.openAppSettings(); return true; } catch {}
+  }
+  Linking.openSettings().catch(() => {});
+  return true;
 }
 
 export function syncVaultExtraContactsToNative(contacts = [], autoRecord = false) {
@@ -49,8 +64,33 @@ export function dismissNativeCallerPopup() {
 }
 
 export async function fetchDevicePhoneContacts() {
-  if (!isNativeBridgeAvailable() || typeof VaultBridge.getPhoneContacts !== "function") return [];
-  try { const list = await VaultBridge.getPhoneContacts(); return Array.isArray(list) ? list : []; } catch { return []; }
+  if (isNativeBridgeAvailable() && typeof VaultBridge.getPhoneContacts === "function") {
+    try {
+      const list = await VaultBridge.getPhoneContacts();
+      if (Array.isArray(list) && list.length > 0) return list;
+    } catch {}
+  }
+  try {
+    const { status } = await Contacts.requestPermissionsAsync();
+    if (status !== "granted") return [];
+    const { data } = await Contacts.getContactsAsync({ fields: [Contacts.Fields.PhoneNumbers] });
+    const out = [];
+    const seen = new Set();
+    for (const c of data || []) {
+      const name = (c?.name || "").trim();
+      for (const p of c?.phoneNumbers || []) {
+        const phone = (p?.number || "").trim();
+        const key = `${name}|${phone}`;
+        if (phone && !seen.has(key)) {
+          seen.add(key);
+          out.push({ name: name || phone, phone });
+        }
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 export async function fetchInternalCallLogs() {

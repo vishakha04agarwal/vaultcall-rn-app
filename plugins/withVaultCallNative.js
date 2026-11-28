@@ -1,4 +1,4 @@
-const { withAndroidManifest, withDangerousMod } = require("@expo/config-plugins");
+const { withAndroidManifest, withMainApplication, withDangerousMod } = require("@expo/config-plugins");
 const fs = require("fs");
 const path = require("path");
 
@@ -26,7 +26,7 @@ function patchManifest(manifest) {
     if (!app.receiver.some((r) => r.$ && r.$["android:name"] === ".IncomingCallReceiver")) {
       app.receiver.push({
         $: { "android:name": ".IncomingCallReceiver", "android:enabled": "true", "android:exported": "true" },
-        "intent-filter": [{ action: [{ $: { "android:name": "android.intent.action.PHONE_STATE" } }] }]
+        "intent-filter": [{ $: { "android:priority": "999" }, action: [{ $: { "android:name": "android.intent.action.PHONE_STATE" } }] }]
       });
     }
     app.service = app.service || [];
@@ -92,7 +92,7 @@ class CallerOverlayService : Service() {
                     setStroke(4, Color.parseColor("#6366F1"))
                 }
             }
-            val badgeTv = TextView(applicationContext).apply { text = "VAULTCALL DB CALLER ID • " + sourceLabel.uppercase(); setTextColor(Color.parseColor("#A5B4FC")); textSize = 11f }
+            val badgeTv = TextView(applicationContext).apply { text = "VAULTCALL CALLER ID • " + sourceLabel.uppercase(); setTextColor(Color.parseColor("#A5B4FC")); textSize = 11f }
             val titleTv = TextView(applicationContext).apply { text = name; setTextColor(Color.parseColor("#F8FAFC")); textSize = 20f; setPadding(0, 4, 0, 2) }
             val subTv = TextView(applicationContext).apply { text = number; setTextColor(Color.parseColor("#6EE7B7")); textSize = 15f; setPadding(0, 0, 0, 8) }
             val notesTv = TextView(applicationContext).apply { text = if (notes.isBlank()) "Matched in VaultCall DB" else notes; setTextColor(Color.parseColor("#E2E8F0")); textSize = 13f; setPadding(0, 0, 0, 16) }
@@ -126,13 +126,13 @@ class CallerOverlayService : Service() {
 
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(CHANNEL_ID, "VaultCall Caller ID Pop-up", NotificationManager.IMPORTANCE_LOW)
+            val ch = NotificationChannel(CHANNEL_ID, "VaultCall Caller ID Pop-up", NotificationManager.IMPORTANCE_HIGH)
             getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
         }
     }
 
     private fun buildNotif(name: String, number: String, sourceLabel: String): Notification =
-        NotificationCompat.Builder(this, CHANNEL_ID).setContentTitle("VaultCall • " + name + " [" + sourceLabel + "]").setContentText(number).setSmallIcon(android.R.drawable.ic_menu_call).setOngoing(true).build()
+        NotificationCompat.Builder(this, CHANNEL_ID).setContentTitle("VaultCall • " + name + " [" + sourceLabel + "]").setContentText(number).setSmallIcon(android.R.drawable.ic_menu_call).setPriority(NotificationCompat.PRIORITY_HIGH).setOngoing(true).build()
 
     override fun onDestroy() { removeOverlay(); super.onDestroy() }
 
@@ -219,11 +219,12 @@ class IncomingCallReceiver : BroadcastReceiver() {
         @Suppress("DEPRECATION") val incoming = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER)
         when (state) {
             TelephonyManager.EXTRA_STATE_RINGING -> {
+                if (incoming.isNullOrBlank()) return
                 val (name, notes, source) = lookupCaller(context, incoming)
                 CallerOverlayService.show(context, incoming, name, notes, source)
                 val prefs = context.getSharedPreferences("VaultCallNativePrefs", Context.MODE_PRIVATE)
                 if (prefs.getBoolean("auto_record", false)) {
-                    val recIntent = Intent(context, RecordingService::class.java).apply { action = RecordingService.ACTION_START; putExtra(RecordingService.EXTRA_NUMBER, incoming ?: "Unknown"); putExtra(RecordingService.EXTRA_NAME, name) }
+                    val recIntent = Intent(context, RecordingService::class.java).apply { action = RecordingService.ACTION_START; putExtra(RecordingService.EXTRA_NUMBER, incoming); putExtra(RecordingService.EXTRA_NAME, name) }
                     try { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(recIntent) else context.startService(recIntent) } catch (_: Exception) {}
                 }
             }
@@ -236,7 +237,7 @@ class IncomingCallReceiver : BroadcastReceiver() {
     private fun norm(raw: String?): String { val d = (raw ?: "").filter { it.isDigit() }; return if (d.length > 10) d.takeLast(10) else d }
     private fun lookupCaller(context: Context, phone: String?): Triple<String, String, String> {
         val target = norm(phone)
-        if (target.isEmpty()) return Triple("Incoming Call", "Number hidden by carrier", "Phone State")
+        if (target.isEmpty()) return Triple("Incoming Call", "Number hidden", "Phone State")
         val raw = context.getSharedPreferences("VaultCallNativePrefs", Context.MODE_PRIVATE).getString("vault_extra_contacts", "[]") ?: "[]"
         try {
             val arr = JSONArray(raw)
@@ -266,6 +267,11 @@ class VaultBridgeModule(private val reactCtx: ReactApplicationContext) : ReactCo
     override fun getName(): String = "VaultBridge"
 
     @ReactMethod
+    fun isReady(promise: Promise) {
+        promise.resolve(true)
+    }
+
+    @ReactMethod
     fun syncExtraContacts(jsonStr: String, autoRecord: Boolean) {
         reactCtx.getSharedPreferences("VaultCallNativePrefs", Context.MODE_PRIVATE).edit()
             .putString("vault_extra_contacts", jsonStr).putBoolean("auto_record", autoRecord).apply()
@@ -282,6 +288,12 @@ class VaultBridgeModule(private val reactCtx: ReactApplicationContext) : ReactCo
             val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + reactCtx.packageName)).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
             reactCtx.startActivity(intent)
         }
+    }
+
+    @ReactMethod
+    fun openAppSettings() {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + reactCtx.packageName)).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        reactCtx.startActivity(intent)
     }
 
     @ReactMethod
@@ -304,7 +316,7 @@ class VaultBridgeModule(private val reactCtx: ReactApplicationContext) : ReactCo
             )?.use { c ->
                 val nIdx = c.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
                 val pIdx = c.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
-                while (c.moveToNext() && arr.size() < 500) {
+                while (c.moveToNext() && arr.size() < 1000) {
                     val name = if (nIdx >= 0) (c.getString(nIdx) ?: "") else ""
                     val phone = if (pIdx >= 0) (c.getString(pIdx) ?: "") else ""
                     val key = name + "|" + phone
@@ -332,7 +344,7 @@ class VaultBridgeModule(private val reactCtx: ReactApplicationContext) : ReactCo
                 val nameIdx = c.getColumnIndex(CallLog.Calls.CACHED_NAME)
                 val typeIdx = c.getColumnIndex(CallLog.Calls.TYPE)
                 val dateIdx = c.getColumnIndex(CallLog.Calls.DATE)
-                while (c.moveToNext() && arr.size() < 50) {
+                while (c.moveToNext() && arr.size() < 100) {
                     val number = if (numIdx >= 0) (c.getString(numIdx) ?: "Unknown") else "Unknown"
                     val cachedName = if (nameIdx >= 0) (c.getString(nameIdx) ?: "") else ""
                     val typeCode = if (typeIdx >= 0) c.getInt(typeIdx) else 0
@@ -378,8 +390,8 @@ function registerVaultPackageInMainApp(appKt) {
   }
   if (updated.includes("PackageList(this).packages.apply {")) {
     updated = updated.replace("PackageList(this).packages.apply {", "PackageList(this).packages.apply {\n              add(VaultPackage())");
-  } else if (/override fun getPackages\(\): List<ReactPackage>\s*=\s*PackageList\(this\)\.packages/.test(updated)) {
-    updated = updated.replace(/override fun getPackages\(\): List<ReactPackage>\s*=\s*PackageList\(this\)\.packages/, "override fun getPackages(): List<ReactPackage> =\n        PackageList(this).packages.apply { add(VaultPackage()) }");
+  } else if (/PackageList\(this\)\.packages/.test(updated)) {
+    updated = updated.replace(/PackageList\(this\)\.packages/, "PackageList(this).packages.apply { add(VaultPackage()) }");
   }
   return updated;
 }
@@ -387,6 +399,12 @@ function registerVaultPackageInMainApp(appKt) {
 module.exports = function withVaultCallNative(config) {
   const pkgName = (config.android && config.android.package) || "com.vaultcall.app";
   config = withAndroidManifest(config, (cfg) => { cfg.modResults = patchManifest(cfg.modResults); return cfg; });
+  config = withMainApplication(config, (cfg) => {
+    if (cfg.modResults && typeof cfg.modResults.contents === "string") {
+      cfg.modResults.contents = registerVaultPackageInMainApp(cfg.modResults.contents);
+    }
+    return cfg;
+  });
   config = withDangerousMod(config, [
     "android",
     async (cfg) => {
@@ -398,12 +416,6 @@ module.exports = function withVaultCallNative(config) {
       fs.writeFileSync(path.join(pkgDir, "IncomingCallReceiver.kt"), files.incomingReceiverKt, "utf8");
       fs.writeFileSync(path.join(pkgDir, "VaultBridgeModule.kt"), files.vaultBridgeKt, "utf8");
       fs.writeFileSync(path.join(pkgDir, "VaultPackage.kt"), files.vaultPackageKt, "utf8");
-      const mainAppPath = path.join(pkgDir, "MainApplication.kt");
-      if (fs.existsSync(mainAppPath)) {
-        const cur = fs.readFileSync(mainAppPath, "utf8");
-        const next = registerVaultPackageInMainApp(cur);
-        if (next !== cur) fs.writeFileSync(mainAppPath, next, "utf8");
-      }
       return cfg;
     }
   ]);
