@@ -267,11 +267,6 @@ class VaultBridgeModule(private val reactCtx: ReactApplicationContext) : ReactCo
     override fun getName(): String = "VaultBridge"
 
     @ReactMethod
-    fun isReady(promise: Promise) {
-        promise.resolve(true)
-    }
-
-    @ReactMethod
     fun syncExtraContacts(jsonStr: String, autoRecord: Boolean) {
         reactCtx.getSharedPreferences("VaultCallNativePrefs", Context.MODE_PRIVATE).edit()
             .putString("vault_extra_contacts", jsonStr).putBoolean("auto_record", autoRecord).apply()
