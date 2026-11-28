@@ -1,58 +1,46 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import {
-  SECURITY_CONSTANTS,
-  buildSecureHeaders,
-  getEnvBackendUrl,
-  normalizeAndValidateUrl,
-} from "../config/security";
-import { fetchWithTimeout } from "./syncManager";
 
-export const DEFAULT_BACKEND_URL = getEnvBackendUrl("https://vault-backend-t9nu.onrender.com");
+export const DEFAULT_BACKEND_URL = "https://vault-backend-t9nu.onrender.com";
 
 const KEYS = {
-  API_URL: "@vaultcall_api_url",
+  BACKEND_URL: "@vaultcall_backend_url",
   PROFILE: "@vaultcall_profile",
-  CONTACTS: "@vaultcall_contacts",
-  TRANSCRIPTS: "@vaultcall_transcripts",
-  CALL_LOGS: "@vaultcall_call_logs",
   AUTO_RECORD: "@vaultcall_auto_record",
+  CACHED_CONTACTS: "@vaultcall_cached_contacts",
+  CACHED_TRANSCRIPTS: "@vaultcall_cached_transcripts",
+  CALL_LOGS: "@vaultcall_call_logs",
   PENDING_CONTACTS: "@vaultcall_pending_contacts",
   PENDING_TRANSCRIPTS: "@vaultcall_pending_transcripts",
 };
 
 export function normalizePhone(raw = "") {
   const digits = String(raw || "").replace(/\D/g, "");
+  if (!digits) return "";
   return digits.length > 10 ? digits.slice(-10) : digits;
 }
 
-function extractListPayload(data) {
-  if (Array.isArray(data)) return data;
-  if (data && Array.isArray(data.data)) return data.data;
-  if (data && Array.isArray(data.items)) return data.items;
-  if (data && Array.isArray(data.contacts)) return data.contacts;
-  if (data && Array.isArray(data.transcripts)) return data.transcripts;
-  return [];
-}
-
 export async function getBackendUrl() {
-  const saved = await AsyncStorage.getItem(KEYS.API_URL);
-  return normalizeAndValidateUrl(saved, DEFAULT_BACKEND_URL);
+  try {
+    const val = await AsyncStorage.getItem(KEYS.BACKEND_URL);
+    return val && val.trim() ? val.trim() : DEFAULT_BACKEND_URL;
+  } catch {
+    return DEFAULT_BACKEND_URL;
+  }
 }
 
 export async function setBackendUrl(url) {
-  const clean = normalizeAndValidateUrl(url, DEFAULT_BACKEND_URL);
-  await AsyncStorage.setItem(KEYS.API_URL, clean);
+  const clean = (url || DEFAULT_BACKEND_URL).trim().replace(/\/+$/, "");
+  await AsyncStorage.setItem(KEYS.BACKEND_URL, clean);
   return clean;
 }
 
 export async function getProfile() {
-  const raw = await AsyncStorage.getItem(KEYS.PROFILE);
-  if (!raw) return { name: "Me", lang: "hi-IN" };
   try {
-    const p = JSON.parse(raw);
+    const raw = await AsyncStorage.getItem(KEYS.PROFILE);
+    const parsed = raw ? JSON.parse(raw) : null;
     return {
-      name: typeof p?.name === "string" && p.name.trim() ? p.name.trim() : "Me",
-      lang: p?.lang === "en-US" ? "en-US" : "hi-IN",
+      name: parsed?.name || "Me",
+      lang: parsed?.lang || "hi-IN",
     };
   } catch {
     return { name: "Me", lang: "hi-IN" };
@@ -61,140 +49,226 @@ export async function getProfile() {
 
 export async function saveProfile(profile) {
   const clean = {
-    name: typeof profile?.name === "string" && profile.name.trim() ? profile.name.trim() : "Me",
-    lang: profile?.lang === "en-US" ? "en-US" : "hi-IN",
+    name: (profile?.name || "Me").trim() || "Me",
+    lang: profile?.lang || "hi-IN",
   };
   await AsyncStorage.setItem(KEYS.PROFILE, JSON.stringify(clean));
   return clean;
 }
 
 export async function getAutoRecord() {
-  return (await AsyncStorage.getItem(KEYS.AUTO_RECORD)) === "true";
+  try {
+    const raw = await AsyncStorage.getItem(KEYS.AUTO_RECORD);
+    return raw === null ? true : raw === "true";
+  } catch {
+    return true;
+  }
 }
 
 export async function setAutoRecord(val) {
   await AsyncStorage.setItem(KEYS.AUTO_RECORD, val ? "true" : "false");
 }
 
-async function readArr(key) {
-  const raw = await AsyncStorage.getItem(key);
-  if (!raw) return [];
+export async function getCachedContacts() {
   try {
-    const p = JSON.parse(raw);
-    return Array.isArray(p) ? p : [];
+    const raw = await AsyncStorage.getItem(KEYS.CACHED_CONTACTS);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
   } catch {
     return [];
   }
 }
 
-async function writeArr(key, arr) {
-  await AsyncStorage.setItem(key, JSON.stringify(Array.isArray(arr) ? arr : []));
+export async function saveCachedContacts(list) {
+  await AsyncStorage.setItem(KEYS.CACHED_CONTACTS, JSON.stringify(Array.isArray(list) ? list : []));
 }
 
-export const getCachedContacts = () => readArr(KEYS.CONTACTS);
-export const saveCachedContacts = (list) => writeArr(KEYS.CONTACTS, list);
-export const getCachedTranscripts = () => readArr(KEYS.TRANSCRIPTS);
-export const saveCachedTranscripts = (list) => writeArr(KEYS.TRANSCRIPTS, list);
-export const getCallLogs = () => readArr(KEYS.CALL_LOGS);
-export const saveCallLogs = (list) => writeArr(KEYS.CALL_LOGS, (Array.isArray(list) ? list : []).slice(0, 150));
+export async function getCachedTranscripts() {
+  try {
+    const raw = await AsyncStorage.getItem(KEYS.CACHED_TRANSCRIPTS);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveCachedTranscripts(list) {
+  await AsyncStorage.setItem(KEYS.CACHED_TRANSCRIPTS, JSON.stringify(Array.isArray(list) ? list : []));
+}
+
+export async function getCallLogs() {
+  try {
+    const raw = await AsyncStorage.getItem(KEYS.CALL_LOGS);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveCallLogs(list) {
+  await AsyncStorage.setItem(KEYS.CALL_LOGS, JSON.stringify(Array.isArray(list) ? list : []));
+}
 
 export async function appendCallLog(entry) {
-  const next = [entry, ...(await getCallLogs())].slice(0, 150);
+  const current = await getCallLogs();
+  const next = [entry, ...current].slice(0, 150);
   await saveCallLogs(next);
   return next;
 }
 
-export const getPendingContacts = () => readArr(KEYS.PENDING_CONTACTS);
-export const savePendingContacts = (list) => writeArr(KEYS.PENDING_CONTACTS, list);
-export async function queuePendingContact(c) {
-  const { _queueId, _retries, ...clean } = c || {};
-  const next = [clean, ...(await getPendingContacts())];
-  await savePendingContacts(next);
-  return next;
+export async function getPendingContacts() {
+  try {
+    const raw = await AsyncStorage.getItem(KEYS.PENDING_CONTACTS);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
 }
 
-export const getPendingTranscripts = () => readArr(KEYS.PENDING_TRANSCRIPTS);
-export const savePendingTranscripts = (list) => writeArr(KEYS.PENDING_TRANSCRIPTS, list);
-export async function queuePendingTranscript(t) {
-  const { _queueId, _retries, ...clean } = t || {};
-  const next = [clean, ...(await getPendingTranscripts())];
-  await savePendingTranscripts(next);
-  return next;
+export async function savePendingContacts(list) {
+  await AsyncStorage.setItem(KEYS.PENDING_CONTACTS, JSON.stringify(Array.isArray(list) ? list : []));
+}
+
+export async function queuePendingContact(item) {
+  const list = await getPendingContacts();
+  list.push(item);
+  await savePendingContacts(list);
+}
+
+export async function getPendingTranscripts() {
+  try {
+    const raw = await AsyncStorage.getItem(KEYS.PENDING_TRANSCRIPTS);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function savePendingTranscripts(list) {
+  await AsyncStorage.setItem(KEYS.PENDING_TRANSCRIPTS, JSON.stringify(Array.isArray(list) ? list : []));
+}
+
+export async function queuePendingTranscript(item) {
+  const list = await getPendingTranscripts();
+  list.push(item);
+  await savePendingTranscripts(list);
 }
 
 export async function fetchContactsRemote(baseUrl) {
-  const clean = normalizeAndValidateUrl(baseUrl, DEFAULT_BACKEND_URL);
-  const res = await fetchWithTimeout(
-    `${clean}/api/v1/contacts`,
-    { method: "GET", headers: buildSecureHeaders() },
-    SECURITY_CONSTANTS.REQUEST_TIMEOUT_MS
-  );
-  if (!res.ok) throw new Error(`Contacts fetch failed (${res.status})`);
-  return extractListPayload(await res.json());
+  const res = await fetch(`${baseUrl}/api/v1/contacts`);
+  if (!res.ok) throw new Error(`Contacts HTTP ${res.status}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
 }
 
-export async function createContactRemote(baseUrl, contact) {
-  const clean = normalizeAndValidateUrl(baseUrl, DEFAULT_BACKEND_URL);
-  const { _queueId, _retries, ...payload } = contact || {};
-  const res = await fetchWithTimeout(
-    `${clean}/api/v1/contacts`,
-    {
-      method: "POST",
-      headers: buildSecureHeaders(),
-      body: JSON.stringify(payload),
-    },
-    SECURITY_CONSTANTS.REQUEST_TIMEOUT_MS
-  );
-  if (!res.ok) throw new Error(`Contact save failed (${res.status})`);
-  const d = await res.json();
-  return d && d.data && !Array.isArray(d.data) ? d.data : d;
+export async function createContactRemote(baseUrl, payload) {
+  const res = await fetch(`${baseUrl}/api/v1/contacts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Create contact HTTP ${res.status}`);
+  return await res.json();
+}
+
+export async function syncPhoneContactsToDatabase(baseUrl, phoneContacts = []) {
+  const cleanList = (Array.isArray(phoneContacts) ? phoneContacts : [])
+    .filter((c) => c && c.name && normalizePhone(c.phone).length >= 5)
+    .slice(0, 1000)
+    .map((c) => ({
+      name: String(c.name).trim(),
+      phone: String(c.phone).trim(),
+      tag: "Phone Book",
+      notes: "From your phone contacts",
+    }));
+
+  if (!cleanList.length) return { ok: true, savedCount: 0 };
+  const res = await fetch(`${baseUrl}/api/v1/contacts/bulk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ contacts: cleanList }),
+  });
+  if (!res.ok) throw new Error(`Bulk contacts HTTP ${res.status}`);
+  return await res.json();
+}
+
+export async function fetchCallLogsRemote(baseUrl) {
+  const res = await fetch(`${baseUrl}/api/v1/call-logs`);
+  if (!res.ok) throw new Error(`Call logs HTTP ${res.status}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
+}
+
+export async function syncCallLogsToDatabase(baseUrl, logs = []) {
+  const cleanLogs = (Array.isArray(logs) ? logs : []).slice(0, 150).map((l) => ({
+    number: l?.number || "Unknown",
+    name: l?.name || "Unknown Caller",
+    source: l?.source || "Phone Book",
+    notes: l?.notes || "",
+    callType: l?.callType || "Call",
+    createdAt: l?.createdAt || "",
+  }));
+  const res = await fetch(`${baseUrl}/api/v1/call-logs/bulk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ logs: cleanLogs }),
+  });
+  if (!res.ok) throw new Error(`Bulk call logs HTTP ${res.status}`);
+  return await res.json();
 }
 
 export async function fetchTranscriptsRemote(baseUrl) {
-  const clean = normalizeAndValidateUrl(baseUrl, DEFAULT_BACKEND_URL);
-  const res = await fetchWithTimeout(
-    `${clean}/api/v1/transcripts`,
-    { method: "GET", headers: buildSecureHeaders() },
-    SECURITY_CONSTANTS.REQUEST_TIMEOUT_MS
-  );
-  if (!res.ok) throw new Error(`Transcripts fetch failed (${res.status})`);
-  return extractListPayload(await res.json());
+  const res = await fetch(`${baseUrl}/api/v1/transcripts`);
+  if (!res.ok) throw new Error(`Transcripts HTTP ${res.status}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
 }
 
-export async function createTranscriptRemote(baseUrl, transcript) {
-  const clean = normalizeAndValidateUrl(baseUrl, DEFAULT_BACKEND_URL);
-  const { _queueId, _retries, ...payload } = transcript || {};
-  const res = await fetchWithTimeout(
-    `${clean}/api/v1/transcripts`,
-    {
-      method: "POST",
-      headers: buildSecureHeaders(),
-      body: JSON.stringify(payload),
-    },
-    SECURITY_CONSTANTS.REQUEST_TIMEOUT_MS
-  );
-  if (!res.ok) throw new Error(`Transcript save failed (${res.status})`);
-  const d = await res.json();
-  return d && d.data && !Array.isArray(d.data) ? d.data : d;
+export async function createTranscriptRemote(baseUrl, payload) {
+  const res = await fetch(`${baseUrl}/api/v1/transcripts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Create transcript HTTP ${res.status}`);
+  return await res.json();
 }
 
 export async function flushPendingQueue(baseUrl) {
-  const clean = normalizeAndValidateUrl(baseUrl, DEFAULT_BACKEND_URL);
+  let syncedContactsCount = 0;
+  let syncedTranscriptsCount = 0;
+
   const pendingC = await getPendingContacts();
-  const remC = [];
-  let syncedC = 0;
-  for (const item of pendingC) {
-    try { await createContactRemote(clean, item); syncedC += 1; } catch { remC.push(item); }
+  if (pendingC.length) {
+    const remainingC = [];
+    for (const c of pendingC) {
+      try {
+        await createContactRemote(baseUrl, c);
+        syncedContactsCount += 1;
+      } catch {
+        remainingC.push(c);
+      }
+    }
+    await savePendingContacts(remainingC);
   }
-  await savePendingContacts(remC);
 
   const pendingT = await getPendingTranscripts();
-  const remT = [];
-  let syncedT = 0;
-  for (const tx of pendingT) {
-    try { await createTranscriptRemote(clean, tx); syncedT += 1; } catch { remT.push(tx); }
+  if (pendingT.length) {
+    const remainingT = [];
+    for (const t of pendingT) {
+      try {
+        await createTranscriptRemote(baseUrl, t);
+        syncedTranscriptsCount += 1;
+      } catch {
+        remainingT.push(t);
+      }
+    }
+    await savePendingTranscripts(remainingT);
   }
-  await savePendingTranscripts(remT);
 
-  return { syncedContactsCount: syncedC, syncedTranscriptsCount: syncedT };
+  return { syncedContactsCount, syncedTranscriptsCount };
 }

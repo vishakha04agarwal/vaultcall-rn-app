@@ -55,14 +55,14 @@ export function syncVaultExtraContactsToNative(extraContacts = [], autoRecord = 
   }
 }
 
-export function triggerNativeCallerPopup(number = "", name = "Unknown Caller", notes = "", sourceLabel = "VaultCall") {
+export function triggerNativeCallerPopup(number = "", name = "Unknown Caller", notes = "", sourceLabel = "VaultCall DB") {
   if (!isNativeBridgeAvailable() || typeof VaultBridge.showNativePopup !== "function") return false;
   try {
     VaultBridge.showNativePopup(
       String(number || ""),
       String(name || "Unknown Caller"),
       String(notes || ""),
-      String(sourceLabel || "VaultCall")
+      String(sourceLabel || "VaultCall DB")
     );
     return true;
   } catch {

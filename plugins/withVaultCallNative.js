@@ -117,7 +117,7 @@ class CallerOverlayService : Service() {
         val number = intent?.getStringExtra(EXTRA_NUMBER) ?: "Unknown"
         val name = intent?.getStringExtra(EXTRA_NAME) ?: "Unknown Caller"
         val notes = intent?.getStringExtra(EXTRA_NOTES) ?: ""
-        val sourceLabel = intent?.getStringExtra(EXTRA_SOURCE) ?: "VaultCall"
+        val sourceLabel = intent?.getStringExtra(EXTRA_SOURCE) ?: "VaultCall DB"
 
         ensureChannel()
         startForeground(NOTIF_ID, buildNotif(name, number, sourceLabel))
@@ -145,7 +145,7 @@ class CallerOverlayService : Service() {
             }
 
             val badgeTv = TextView(applicationContext).apply {
-                text = "VAULTCALL LIVE CALLER ID • " + sourceLabel.uppercase()
+                text = "VAULTCALL DB CALLER ID • " + sourceLabel.uppercase()
                 setTextColor(Color.parseColor("#A5B4FC"))
                 textSize = 11f
             }
@@ -165,7 +165,7 @@ class CallerOverlayService : Service() {
             }
 
             val notesTv = TextView(applicationContext).apply {
-                text = if (notes.isBlank()) "Saved in VaultCall / Phone Book" else notes
+                text = if (notes.isBlank()) "Matched in your VaultCall database" else notes
                 setTextColor(Color.parseColor("#E2E8F0"))
                 textSize = 13f
                 setPadding(0, 0, 0, 16)
@@ -437,7 +437,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import android.provider.ContactsContract
 import android.telephony.TelephonyManager
 import org.json.JSONArray
 
@@ -450,7 +449,7 @@ class IncomingCallReceiver : BroadcastReceiver() {
 
         when (state) {
             TelephonyManager.EXTRA_STATE_RINGING -> {
-                val (name, notes, source) = lookupCaller(context, incoming)
+                val (name, notes, source) = lookupCallerFromVaultDb(context, incoming)
                 CallerOverlayService.show(context, incoming, name, notes, source)
                 val prefs = context.getSharedPreferences("VaultCallNativePrefs", Context.MODE_PRIVATE)
                 if (prefs.getBoolean("auto_record", false)) {
@@ -484,49 +483,26 @@ class IncomingCallReceiver : BroadcastReceiver() {
         return if (d.length > 10) d.takeLast(10) else d
     }
 
-    private fun lookupCaller(context: Context, phone: String?): Triple<String, String, String> {
+    private fun lookupCallerFromVaultDb(context: Context, phone: String?): Triple<String, String, String> {
         val target = norm(phone)
         if (target.isEmpty()) return Triple("Incoming Call", "Number hidden by carrier", "Phone State")
 
         val prefs = context.getSharedPreferences("VaultCallNativePrefs", Context.MODE_PRIVATE)
-        val rawExtra = prefs.getString("vault_extra_contacts", "[]") ?: "[]"
+        val rawContacts = prefs.getString("vault_extra_contacts", "[]") ?: "[]"
         try {
-            val arr = JSONArray(rawExtra)
+            val arr = JSONArray(rawContacts)
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
                 if (norm(obj.optString("phone")) == target) {
-                    val n = obj.optString("name", "Vault Contact")
+                    val n = obj.optString("name", "Saved Contact")
                     val note = obj.optString("notes", "")
-                    return Triple(n, note, "Vault Extra")
+                    val tag = obj.optString("tag", "VaultCall DB")
+                    return Triple(n, note, tag)
                 }
             }
         } catch (_: Exception) {}
 
-        try {
-            val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
-            context.contentResolver.query(
-                uri,
-                arrayOf(
-                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
-                    ContactsContract.CommonDataKinds.Phone.NUMBER
-                ),
-                null,
-                null,
-                null
-            )?.use { cursor ->
-                val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
-                val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
-                while (cursor.moveToNext()) {
-                    val num = if (numIdx >= 0) cursor.getString(numIdx) else ""
-                    if (norm(num) == target) {
-                        val name = if (nameIdx >= 0) cursor.getString(nameIdx) else "Phone Contact"
-                        return Triple(name ?: "Phone Contact", "From your phone contacts", "Phone Book")
-                    }
-                }
-            }
-        } catch (_: Exception) {}
-
-        return Triple("Unknown Caller", "Not in Vault or your Phone Contacts", "Unknown")
+        return Triple("Unknown Caller", "Not found in your VaultCall database", "VaultCall DB")
     }
 }
 `;
@@ -727,17 +703,6 @@ function registerVaultPackageInMainApp(appKt) {
       /override fun getPackages\(\): List<ReactPackage>\s*=\s*PackageList\(this\)\.packages/,
       "override fun getPackages(): List<ReactPackage> =\n        PackageList(this).packages.apply { add(VaultPackage()) }"
     );
-  } else if (updated.includes("override fun getPackages(): List<ReactPackage> =")) {
-    updated = updated.replace(
-      /override fun getPackages\(\): List<ReactPackage> =\s*PackageList\(this\)\.packages(?:\.apply\s*\{)?/,
-      "override fun getPackages(): List<ReactPackage> = PackageList(this).packages.apply {\n              add(VaultPackage())"
-    );
-    if (!updated.includes("add(VaultPackage())")) {
-      updated = updated.replace(
-        /override fun getPackages\(\): List<ReactPackage> =[^\r\n]*/,
-        "override fun getPackages(): List<ReactPackage> = PackageList(this).packages.apply { add(VaultPackage()) }"
-      );
-    }
   }
 
   return updated;

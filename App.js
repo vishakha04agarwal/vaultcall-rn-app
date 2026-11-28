@@ -12,8 +12,9 @@ import {
   getAutoRecord, setAutoRecord, getCachedContacts, saveCachedContacts, getCachedTranscripts,
   saveCachedTranscripts, getCallLogs, saveCallLogs, appendCallLog, getPendingContacts,
   savePendingContacts, queuePendingContact, getPendingTranscripts, savePendingTranscripts,
-  queuePendingTranscript, fetchContactsRemote, createContactRemote, fetchTranscriptsRemote,
-  createTranscriptRemote, flushPendingQueue,
+  queuePendingTranscript, fetchContactsRemote, createContactRemote, syncPhoneContactsToDatabase,
+  fetchCallLogsRemote, syncCallLogsToDatabase, fetchTranscriptsRemote, createTranscriptRemote,
+  flushPendingQueue,
 } from "./src/services/storage";
 import {
   isNativeBridgeAvailable, requestCallAndContactsPermissions, checkOverlayPermission,
@@ -21,21 +22,20 @@ import {
   dismissNativeCallerPopup, fetchDevicePhoneContacts, fetchInternalCallLogs,
 } from "./src/services/nativeBridge";
 
-function mergeCallLogsWithRecordings(systemLogs = [], existingLogs = [], extraContacts = [], devContacts = []) {
+function mergeCallLogsWithRecordings(systemLogs = [], existingLogs = [], dbContacts = []) {
   const existingWithAudio = (Array.isArray(existingLogs) ? existingLogs : []).filter((e) => e && e.audioUri);
   const mapped = (Array.isArray(systemLogs) ? systemLogs : []).map((item, idx) => {
     const target = normalizePhone(item.number);
-    const extraMatch = extraContacts.find((c) => normalizePhone(c.phone) === target);
-    const phoneMatch = devContacts.find((c) => normalizePhone(c.phone) === target);
-    const resolvedName = extraMatch ? extraMatch.name : item.phoneName || phoneMatch?.name || "Unknown Caller";
+    const dbMatch = dbContacts.find((c) => normalizePhone(c.phone) === target);
+    const resolvedName = dbMatch?.name || item.phoneName || "Unknown Caller";
     const audioMatch = existingWithAudio.find((old) => normalizePhone(old.number) === target && !old._used);
     if (audioMatch) audioMatch._used = true;
     return {
-      id: `sys_${idx}_${target || "num"}_${item.createdAt || idx}`,
+      id: `log_${idx}_${target || "num"}_${item.createdAt || idx}`,
       number: item.number || "Unknown",
       name: resolvedName,
-      source: extraMatch ? "Vault Extra" : phoneMatch || item.phoneName ? "Phone Book" : "Unknown",
-      notes: extraMatch?.notes || (phoneMatch || item.phoneName ? "From your phone contacts" : ""),
+      source: dbMatch?.tag || "VaultCall DB",
+      notes: dbMatch?.notes || "",
       callType: item.callType || "Call",
       createdAt: item.createdAt || "",
       audioUri: audioMatch ? audioMatch.audioUri : null,
@@ -46,15 +46,14 @@ function mergeCallLogsWithRecordings(systemLogs = [], existingLogs = [], extraCo
 
 export default function App() {
   const [apiUrl, setApiUrlState] = useState(DEFAULT_BACKEND_URL);
-  const [statusText, setStatusText] = useState("Connecting to VaultCall...");
+  const [statusText, setStatusText] = useState("Connecting to VaultCall DB...");
   const [backendOnline, setBackendOnline] = useState(false);
   const [tab, setTab] = useState("contacts");
-  const [contactSourceFilter, setContactSourceFilter] = useState("all");
+  const [contactFilter, setContactFilter] = useState("all");
   const [searchText, setSearchText] = useState("");
   const [profile, setProfile] = useState({ name: "Me", lang: "hi-IN" });
   const [autoRecord, setAutoRecordState] = useState(true);
-  const [vaultExtraContacts, setVaultExtraContacts] = useState([]);
-  const [phoneContacts, setPhoneContacts] = useState([]);
+  const [dbContacts, setDbContacts] = useState([]);
   const [transcripts, setTranscripts] = useState([]);
   const [callLogs, setCallLogs] = useState([]);
   const [overlayGranted, setOverlayGranted] = useState(false);
@@ -76,15 +75,14 @@ export default function App() {
   const mountedRef = useRef(true);
   const stateRef = useRef({
     apiUrl: DEFAULT_BACKEND_URL,
-    vaultExtraContacts: [],
-    phoneContacts: [],
+    dbContacts: [],
     callLogs: [],
     autoRecord: true,
   });
 
   useEffect(() => {
-    stateRef.current = { apiUrl, vaultExtraContacts, phoneContacts, callLogs, autoRecord };
-  }, [apiUrl, vaultExtraContacts, phoneContacts, callLogs, autoRecord]);
+    stateRef.current = { apiUrl, dbContacts, callLogs, autoRecord };
+  }, [apiUrl, dbContacts, callLogs, autoRecord]);
 
   const nativeReady = isNativeBridgeAvailable();
 
@@ -93,72 +91,108 @@ export default function App() {
     if (mountedRef.current) setPendingCount(pc.length + pt.length);
   }, []);
 
-  const refreshPhoneIntegration = useCallback(
-    async (extraList, recFlag, currentLogs) => {
-      const targetExtra = extraList ?? stateRef.current.vaultExtraContacts;
-      const targetRec = recFlag ?? stateRef.current.autoRecord;
-      const targetLogs = currentLogs ?? stateRef.current.callLogs;
+  const syncDeviceAndDatabase = useCallback(
+    async (targetUrl, currentContacts, recFlag, currentLogs) => {
+      const cleanUrl = (targetUrl || stateRef.current.apiUrl || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
+      const currentRec = recFlag ?? stateRef.current.autoRecord;
+      let workingContacts = currentContacts ?? stateRef.current.dbContacts;
+      let workingLogs = currentLogs ?? stateRef.current.callLogs;
 
-      syncVaultExtraContactsToNative(targetExtra, targetRec);
       const hasOverlay = await checkOverlayPermission();
       if (mountedRef.current) setOverlayGranted(hasOverlay);
-      if (!nativeReady) return targetLogs;
 
-      let devContacts = stateRef.current.phoneContacts;
-      try {
-        devContacts = await fetchDevicePhoneContacts();
-        if (mountedRef.current) setPhoneContacts(devContacts);
-      } catch {}
-
-      try {
-        const devLogs = await fetchInternalCallLogs();
-        if (devLogs.length > 0) {
-          const merged = mergeCallLogsWithRecordings(devLogs, targetLogs, targetExtra, devContacts);
-          await saveCallLogs(merged);
-          if (mountedRef.current) setCallLogs(merged);
-          return merged;
-        }
-      } catch {}
-      return targetLogs;
-    },
-    [nativeReady]
-  );
-
-  const syncWithBackend = useCallback(
-    async (targetUrl, extraList, recFlag) => {
-      const cleanUrl = (targetUrl || stateRef.current.apiUrl || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
-      const currentExtra = extraList ?? stateRef.current.vaultExtraContacts;
-      const currentRec = recFlag ?? stateRef.current.autoRecord;
+      let devContacts = [];
+      let devLogs = [];
+      if (nativeReady) {
+        try {
+          devContacts = await fetchDevicePhoneContacts();
+        } catch {}
+        try {
+          devLogs = await fetchInternalCallLogs();
+        } catch {}
+      }
 
       const health = await checkBackendHealth(cleanUrl);
       if (mountedRef.current) setBackendOnline(health.ok);
 
       try {
-        const q = await flushPendingQueue(cleanUrl);
-        const [remoteC, remoteT] = await Promise.all([
-          fetchContactsRemote(cleanUrl),
-          fetchTranscriptsRemote(cleanUrl),
-        ]);
+        await flushPendingQueue(cleanUrl);
+        if (devContacts.length > 0) {
+          await syncPhoneContactsToDatabase(cleanUrl, devContacts);
+        }
+        const remoteContacts = await fetchContactsRemote(cleanUrl);
+        if (remoteContacts.length > 0) {
+          workingContacts = remoteContacts;
+          await saveCachedContacts(workingContacts);
+        } else if (devContacts.length > 0) {
+          workingContacts = devContacts.map((c, idx) => ({
+            id: `phone_${idx}_${normalizePhone(c.phone)}`,
+            name: c.name,
+            phone: c.phone,
+            tag: "Phone Book",
+            notes: "From your phone contacts",
+          }));
+          await saveCachedContacts(workingContacts);
+        }
+
+        if (devLogs.length > 0) {
+          workingLogs = mergeCallLogsWithRecordings(devLogs, workingLogs, workingContacts);
+          await syncCallLogsToDatabase(cleanUrl, workingLogs);
+          await saveCallLogs(workingLogs);
+        } else {
+          const remoteLogs = await fetchCallLogsRemote(cleanUrl);
+          if (remoteLogs.length > 0) {
+            workingLogs = remoteLogs;
+            await saveCallLogs(workingLogs);
+          }
+        }
+
+        const remoteT = await fetchTranscriptsRemote(cleanUrl);
         if (!mountedRef.current) return;
-        const mergedContacts = remoteC.length > 0 ? remoteC : currentExtra;
-        setVaultExtraContacts(mergedContacts);
+
+        setDbContacts(workingContacts);
+        setCallLogs(workingLogs);
         setTranscripts(remoteT);
         setBackendOnline(true);
-        await saveCachedContacts(mergedContacts);
         await saveCachedTranscripts(remoteT);
-        syncVaultExtraContactsToNative(mergedContacts, currentRec);
+        syncVaultExtraContactsToNative(workingContacts, currentRec);
         await updatePendingBadge();
-        const note = q.syncedContactsCount + q.syncedTranscriptsCount > 0 ? " (Queued synced)" : "";
-        setStatusText(`Online | ${mergedContacts.length} Vault + ${stateRef.current.phoneContacts.length} Phone${note}`);
+        setStatusText(`DB Connected | ${workingContacts.length} Contacts | ${workingLogs.length} Logs`);
       } catch {
-        await updatePendingBadge();
-        if (mountedRef.current) {
-          setBackendOnline(false);
-          setStatusText(`Local Vault | ${currentExtra.length} Vault + ${stateRef.current.phoneContacts.length} Phone`);
+        if (devContacts.length > 0) {
+          const map = new Map();
+          for (const c of workingContacts) {
+            map.set(`${normalizePhone(c.phone)}_${c.tag || "Vault"}`, c);
+          }
+          for (const dc of devContacts) {
+            const k = `${normalizePhone(dc.phone)}_Phone Book`;
+            if (!map.has(k)) {
+              map.set(k, {
+                id: `phone_${normalizePhone(dc.phone)}_${map.size}`,
+                name: dc.name,
+                phone: dc.phone,
+                tag: "Phone Book",
+                notes: "From your phone contacts",
+              });
+            }
+          }
+          workingContacts = Array.from(map.values());
+          await saveCachedContacts(workingContacts);
         }
+        if (devLogs.length > 0) {
+          workingLogs = mergeCallLogsWithRecordings(devLogs, workingLogs, workingContacts);
+          await saveCallLogs(workingLogs);
+        }
+        await updatePendingBadge();
+        if (!mountedRef.current) return;
+        setDbContacts(workingContacts);
+        setCallLogs(workingLogs);
+        setBackendOnline(false);
+        syncVaultExtraContactsToNative(workingContacts, currentRec);
+        setStatusText(`Local DB | ${workingContacts.length} Contacts | ${workingLogs.length} Logs`);
       }
     },
-    [updatePendingBadge]
+    [nativeReady, updatePendingBadge]
   );
 
   const syncEngineRef = useRef(null);
@@ -202,13 +236,12 @@ export default function App() {
       setApiUrlState(url);
       setProfile(prof);
       setAutoRecordState(recFlag);
-      setVaultExtraContacts(cachedC);
+      setDbContacts(cachedC);
       setTranscripts(cachedT);
       setCallLogs(logs);
       if (cachedC[0]?.phone) setLookupPhone(cachedC[0].phone);
       await updatePendingBadge();
-      await refreshPhoneIntegration(cachedC, recFlag, logs);
-      await syncWithBackend(url, cachedC, recFlag);
+      await syncDeviceAndDatabase(url, cachedC, recFlag, logs);
     })();
 
     return () => {
@@ -218,82 +251,82 @@ export default function App() {
       if (recordingRef.current) { recordingRef.current.stopAndUnloadAsync().catch(() => {}); recordingRef.current = null; }
       if (soundRef.current) { soundRef.current.unloadAsync().catch(() => {}); soundRef.current = null; }
     };
-  }, [refreshPhoneIntegration, syncWithBackend, updatePendingBadge]);
+  }, [syncDeviceAndDatabase, updatePendingBadge]);
 
   const matchedCaller = useMemo(() => {
     const target = normalizePhone(lookupPhone);
     if (!target) return null;
-    const extra = vaultExtraContacts.find((c) => normalizePhone(c.phone) === target);
-    if (extra) return { id: extra.id, name: extra.name, phone: extra.phone, notes: extra.notes || "", source: "Vault Extra" };
-    const dev = phoneContacts.find((c) => normalizePhone(c.phone) === target);
-    if (dev) return { id: `phone_${target}`, name: dev.name, phone: dev.phone, notes: "From your phone contacts", source: "Phone Book" };
+    const extra = dbContacts.find((c) => normalizePhone(c.phone) === target && c.tag === "Extra Vault");
+    if (extra) return { id: extra.id, name: extra.name, phone: extra.phone, notes: extra.notes || "", source: "Extra Vault" };
+    const found = dbContacts.find((c) => normalizePhone(c.phone) === target);
+    if (found) return { id: found.id, name: found.name, phone: found.phone, notes: found.notes || "From VaultCall DB", source: found.tag || "VaultCall DB" };
     return null;
-  }, [vaultExtraContacts, phoneContacts, lookupPhone]);
+  }, [dbContacts, lookupPhone]);
 
   const displayedContacts = useMemo(() => {
-    const extraItems = (vaultExtraContacts || []).map((c, idx) => ({
-      id: String(c.id || `extra_${c.phone}_${idx}`),
-      name: c.name || "Vault Contact",
+    const list = (dbContacts || []).map((c, idx) => ({
+      id: String(c.id || `db_${normalizePhone(c.phone) || idx}_${idx}`),
+      name: c.name || "Saved Contact",
       phone: c.phone || "",
+      tag: c.tag || "VaultCall DB",
       notes: c.notes || "",
-      source: "Vault Extra",
-    }));
-    const phoneItems = (phoneContacts || []).map((c, idx) => ({
-      id: `phone_${normalizePhone(c.phone) || idx}_${idx}`,
-      name: c.name || "Phone Contact",
-      phone: c.phone || "",
-      notes: "From your phone contacts",
-      source: "Phone Book",
     }));
 
-    const baseList =
-      contactSourceFilter === "extra"
-        ? extraItems
-        : contactSourceFilter === "phone"
-          ? phoneItems
-          : [...extraItems, ...phoneItems];
+    const filteredByTag =
+      contactFilter === "extra"
+        ? list.filter((i) => i.tag === "Extra Vault")
+        : contactFilter === "phone"
+          ? list.filter((i) => i.tag === "Phone Book")
+          : list;
 
     const q = searchText.trim().toLowerCase();
     const qDigits = normalizePhone(searchText);
-    if (!q) return baseList;
-    return baseList.filter((item) => {
+    if (!q) return filteredByTag;
+    return filteredByTag.filter((item) => {
       const nameMatch = (item.name || "").toLowerCase().includes(q);
       const phoneMatch = (item.phone || "").toLowerCase().includes(q) || (qDigits && normalizePhone(item.phone).includes(qDigits));
       return nameMatch || phoneMatch;
     });
-  }, [vaultExtraContacts, phoneContacts, contactSourceFilter, searchText]);
+  }, [dbContacts, contactFilter, searchText]);
 
-  const handleEnablePhoneIntegration = async () => {
+  const handleSyncAndAllow = async () => {
     await requestCallAndContactsPermissions();
     if (nativeReady) {
-      await refreshPhoneIntegration(vaultExtraContacts, autoRecord, callLogs);
       const hasOverlay = await checkOverlayPermission();
       setOverlayGranted(hasOverlay);
       if (!hasOverlay) {
         openOverlayPermissionSettings();
       }
     }
-    await syncWithBackend(apiUrl, vaultExtraContacts, autoRecord);
+    await syncDeviceAndDatabase(apiUrl, dbContacts, autoRecord, callLogs);
   };
 
   const handleSaveContact = async () => {
-    if (!nameInput.trim() || normalizePhone(phoneInput).length < 6) {
+    if (!nameInput.trim() || normalizePhone(phoneInput).length < 5) {
       Alert.alert("Validation", "Please enter a valid name and phone number.");
       return;
     }
-    const payload = { name: nameInput.trim(), phone: phoneInput.trim(), tag: tagInput.trim() || "Extra Vault", notes: notesInput.trim() };
+    const payload = {
+      name: nameInput.trim(),
+      phone: phoneInput.trim(),
+      tag: tagInput.trim() || "Extra Vault",
+      notes: notesInput.trim(),
+    };
     try {
       const saved = await createContactRemote(apiUrl, payload);
       const item = saved && (saved.id || saved.name) ? saved : { id: String(Date.now()), ...payload };
-      const next = [item, ...vaultExtraContacts.filter((c) => c.id !== item.id)];
-      setVaultExtraContacts(next); await saveCachedContacts(next);
+      const next = [item, ...dbContacts.filter((c) => c.id !== item.id)];
+      setDbContacts(next);
+      await saveCachedContacts(next);
       syncVaultExtraContactsToNative(next, autoRecord);
       setBackendOnline(true);
       setNameInput(""); setPhoneInput(""); setNotesInput("");
     } catch {
-      const next = [{ id: String(Date.now()), ...payload }, ...vaultExtraContacts];
-      setVaultExtraContacts(next); await saveCachedContacts(next);
-      await queuePendingContact(payload); await updatePendingBadge();
+      const next = [{ id: String(Date.now()), ...payload }, ...dbContacts];
+      setDbContacts(next);
+      await saveCachedContacts(next);
+      await queuePendingContact(payload);
+      await updatePendingBadge();
       syncVaultExtraContactsToNative(next, autoRecord);
       setBackendOnline(false);
       setNameInput(""); setPhoneInput(""); setNotesInput("");
@@ -310,7 +343,7 @@ export default function App() {
         const nextLogs = await appendCallLog({
           id: String(Date.now()), number: lookupPhone || "Unknown",
           name: matchedCaller ? matchedCaller.name : "Unknown Caller",
-          source: matchedCaller ? matchedCaller.source : "Unknown", notes: matchedCaller?.notes || "",
+          source: matchedCaller ? matchedCaller.source : "VaultCall DB", notes: matchedCaller?.notes || "",
           callType: "Recorded Call", audioUri: uri, createdAt: new Date().toLocaleString(),
         });
         setCallLogs(nextLogs);
@@ -377,21 +410,15 @@ export default function App() {
     const clean = await setBackendUrl(apiUrl); setApiUrlState(clean);
     const cleanProfile = await saveProfile(profile); setProfile(cleanProfile);
     await setAutoRecord(autoRecord);
-    syncVaultExtraContactsToNative(vaultExtraContacts, autoRecord);
-    await syncWithBackend(clean, vaultExtraContacts, autoRecord);
+    syncVaultExtraContactsToNative(dbContacts, autoRecord);
+    await syncDeviceAndDatabase(clean, dbContacts, autoRecord, callLogs);
   };
 
   const triggerCallerPopup = async (phoneVal) => {
     const num = (phoneVal ?? lookupPhone).trim();
     if (num) setLookupPhone(num);
     const target = normalizePhone(num);
-    const extra = vaultExtraContacts.find((c) => normalizePhone(c.phone) === target);
-    const dev = phoneContacts.find((c) => normalizePhone(c.phone) === target);
-    const match = extra
-      ? { name: extra.name, notes: extra.notes || "", source: "Vault Extra" }
-      : dev
-        ? { name: dev.name, notes: "From your phone contacts", source: "Phone Book" }
-        : null;
+    const match = dbContacts.find((c) => normalizePhone(c.phone) === target);
 
     if (nativeReady) {
       const hasOverlay = await checkOverlayPermission();
@@ -402,8 +429,8 @@ export default function App() {
         triggerNativeCallerPopup(
           num || "Unknown",
           match ? match.name : "Unknown Caller",
-          match ? match.notes : "Not in Vault or Phone Contacts",
-          match ? match.source : "Unknown"
+          match ? match.notes || "Matched in VaultCall DB" : "Not in your VaultCall DB",
+          match ? match.tag || "VaultCall DB" : "VaultCall DB"
         );
       }
     }
@@ -421,7 +448,7 @@ export default function App() {
     ({ item: c }) => (
       <View style={styles.card}>
         <View style={styles.rowBetween}>
-          <Text style={styles.contactName}>{c.name} ({c.source})</Text>
+          <Text style={styles.contactName}>{c.name} ({c.tag || "VaultCall DB"})</Text>
           <TouchableOpacity style={styles.smallBtn} onPress={() => triggerCallerPopup(c.phone)}>
             <Text style={styles.smallBtnText}>Pop-up</Text>
           </TouchableOpacity>
@@ -430,7 +457,7 @@ export default function App() {
         {c.notes ? <Text style={styles.noteText}>{c.notes}</Text> : null}
       </View>
     ),
-    [vaultExtraContacts, phoneContacts, nativeReady, lookupPhone]
+    [dbContacts, nativeReady, lookupPhone]
   );
 
   const renderTranscriptItem = useCallback(
@@ -470,40 +497,40 @@ export default function App() {
     () => (
       <View style={styles.stack}>
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Add Extra Vault Contact (Not in Phone List)</Text>
+          <Text style={styles.cardTitle}>Add Contact to Your VaultCall DB</Text>
           <TextInput style={styles.input} placeholder="Name" placeholderTextColor="#64748B" value={nameInput} onChangeText={setNameInput} />
           <TextInput style={styles.input} placeholder="Phone (+91 98765 43210)" placeholderTextColor="#64748B" keyboardType="phone-pad" value={phoneInput} onChangeText={setPhoneInput} />
           <TextInput style={styles.input} placeholder="Tag" placeholderTextColor="#64748B" value={tagInput} onChangeText={setTagInput} />
           <TextInput style={[styles.input, styles.textarea]} placeholder="Notes shown in incoming call pop-up..." placeholderTextColor="#64748B" multiline value={notesInput} onChangeText={setNotesInput} />
-          <TouchableOpacity style={styles.primaryBtn} onPress={handleSaveContact}><Text style={styles.btnText}>Save Extra Contact</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.primaryBtn} onPress={handleSaveContact}><Text style={styles.btnText}>Save to VaultCall DB</Text></TouchableOpacity>
         </View>
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Caller Lookup & Incoming Pop-up Test</Text>
-          <TextInput style={styles.input} placeholder="Enter number to lookup / test pop-up..." placeholderTextColor="#64748B" keyboardType="phone-pad" value={lookupPhone} onChangeText={setLookupPhone} />
+          <Text style={styles.cardTitle}>Database Caller Lookup & Pop-up</Text>
+          <TextInput style={styles.input} placeholder="Enter number to search DB / show pop-up..." placeholderTextColor="#64748B" keyboardType="phone-pad" value={lookupPhone} onChangeText={setLookupPhone} />
           <View style={styles.matchBox}>
             <Text style={styles.matchTitle}>{matchedCaller ? `${matchedCaller.name} (${matchedCaller.source})` : "Unknown Caller"}</Text>
-            <Text style={styles.matchSub}>{matchedCaller ? matchedCaller.notes || "Saved contact" : "Not found in your phone or Vault extra contacts."}</Text>
+            <Text style={styles.matchSub}>{matchedCaller ? matchedCaller.notes || "Matched in VaultCall DB" : "Not found in your VaultCall DB."}</Text>
           </View>
-          <TouchableOpacity style={styles.secondaryBtn} onPress={() => triggerCallerPopup(lookupPhone)}><Text style={styles.btnText}>Show Truecaller-Style Pop-up</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.secondaryBtn} onPress={() => triggerCallerPopup(lookupPhone)}><Text style={styles.btnText}>Show Call Pop-up</Text></TouchableOpacity>
         </View>
         <View style={styles.card}>
           <TextInput
             style={styles.input}
-            placeholder="Search saved or phone contacts by name/number..."
+            placeholder="Search database contacts by name or number..."
             placeholderTextColor="#64748B"
             value={searchText}
             onChangeText={setSearchText}
           />
           <View style={styles.rowGap}>
             {[
-              ["all", `All (${vaultExtraContacts.length + phoneContacts.length})`],
-              ["extra", `Vault (${vaultExtraContacts.length})`],
-              ["phone", `Phone (${phoneContacts.length})`],
+              ["all", `All (${dbContacts.length})`],
+              ["extra", `Extra (${dbContacts.filter((c) => c.tag === "Extra Vault").length})`],
+              ["phone", `Phone (${dbContacts.filter((c) => c.tag === "Phone Book").length})`],
             ].map(([key, label]) => (
               <TouchableOpacity
                 key={key}
-                style={[styles.speakerChip, contactSourceFilter === key && styles.speakerChipActive]}
-                onPress={() => setContactSourceFilter(key)}
+                style={[styles.speakerChip, contactFilter === key && styles.speakerChipActive]}
+                onPress={() => setContactFilter(key)}
               >
                 <Text style={styles.btnText}>{label}</Text>
               </TouchableOpacity>
@@ -512,7 +539,7 @@ export default function App() {
         </View>
       </View>
     ),
-    [nameInput, phoneInput, tagInput, notesInput, lookupPhone, matchedCaller, searchText, vaultExtraContacts.length, phoneContacts.length, contactSourceFilter]
+    [nameInput, phoneInput, tagInput, notesInput, lookupPhone, matchedCaller, searchText, dbContacts, contactFilter]
   );
 
   const transcriptsHeader = useMemo(
@@ -544,14 +571,14 @@ export default function App() {
   const logsHeader = useMemo(
     () => (
       <View style={[styles.card, { marginBottom: 14 }]}>
-        <Text style={styles.cardTitle}>Phone Call History & Recordings</Text>
+        <Text style={styles.cardTitle}>Call Logs (Synced with VaultCall DB)</Text>
         <View style={styles.rowGap}>
-          <TouchableOpacity style={styles.secondaryBtnFlex} onPress={() => refreshPhoneIntegration(vaultExtraContacts, autoRecord, callLogs)}><Text style={styles.btnText}>Refresh Phone Logs</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.secondaryBtnFlex} onPress={() => syncDeviceAndDatabase(apiUrl, dbContacts, autoRecord, callLogs)}><Text style={styles.btnText}>Sync Call Logs to DB</Text></TouchableOpacity>
           <TouchableOpacity style={styles.secondaryBtnFlex} onPress={() => playLastRecording(lastAudioUri)}><Text style={styles.btnText}>Play Latest Audio</Text></TouchableOpacity>
         </View>
       </View>
     ),
-    [vaultExtraContacts, autoRecord, callLogs, lastAudioUri]
+    [apiUrl, dbContacts, autoRecord, callLogs, lastAudioUri]
   );
 
   return (
@@ -570,9 +597,9 @@ export default function App() {
       </View>
       <View style={styles.permBanner}>
         <Text style={styles.permText}>
-          {`Vault: ${vaultExtraContacts.length} | Phone: ${phoneContacts.length} | Overlay: ${overlayGranted ? "ON" : "OFF"}`}
+          {`DB Contacts: ${dbContacts.length} | Logs: ${callLogs.length} | Overlay: ${overlayGranted ? "ON" : "OFF"}`}
         </Text>
-        <TouchableOpacity style={styles.smallBtn} onPress={handleEnablePhoneIntegration}>
+        <TouchableOpacity style={styles.smallBtn} onPress={handleSyncAndAllow}>
           <Text style={styles.smallBtnText}>Sync & Allow</Text>
         </TouchableOpacity>
       </View>
@@ -592,7 +619,7 @@ export default function App() {
           ListHeaderComponent={contactsHeader}
           ListEmptyComponent={
             <View style={styles.card}>
-              <Text style={styles.matchSub}>No contacts found. Tap Sync & Allow to load Phone Contacts or add a Vault contact above.</Text>
+              <Text style={styles.matchSub}>Tap Sync & Allow to import phone contacts into VaultCall DB or add one above.</Text>
             </View>
           }
           contentContainerStyle={styles.content}
@@ -625,7 +652,7 @@ export default function App() {
           keyExtractor={(log, logIdx) => String(log.id || `log_${logIdx}`)}
           renderItem={renderLogItem}
           ListHeaderComponent={logsHeader}
-          ListEmptyComponent={<View style={styles.card}><Text style={styles.matchSub}>No call logs found yet. Tap Sync & Allow.</Text></View>}
+          ListEmptyComponent={<View style={styles.card}><Text style={styles.matchSub}>No call logs yet. Tap Sync & Allow.</Text></View>}
           contentContainerStyle={styles.content}
           ItemSeparatorComponent={() => <View style={{ height: 14 }} />}
           initialNumToRender={15}
@@ -642,8 +669,8 @@ export default function App() {
           contentContainerStyle={styles.content}
           renderItem={() => (
             <View style={styles.card}>
-              <Text style={styles.cardTitle}>Phone Integration & Backend Settings</Text>
-              <TouchableOpacity style={styles.secondaryBtn} onPress={handleEnablePhoneIntegration}><Text style={styles.btnText}>Grant Call, Contacts & Overlay Permissions</Text></TouchableOpacity>
+              <Text style={styles.cardTitle}>VaultCall DB & Phone Settings</Text>
+              <TouchableOpacity style={styles.secondaryBtn} onPress={handleSyncAndAllow}><Text style={styles.btnText}>Sync Phone Book & Logs to DB + Permissions</Text></TouchableOpacity>
               <TouchableOpacity style={styles.secondaryBtn} onPress={() => openOverlayPermissionSettings()}><Text style={styles.btnText}>Open Display Over Other Apps Settings</Text></TouchableOpacity>
               <Text style={styles.label}>Backend URL</Text>
               <TextInput style={styles.input} value={apiUrl} onChangeText={setApiUrlState} placeholder="https://vault-backend-t9nu.onrender.com" placeholderTextColor="#64748B" />
@@ -659,10 +686,10 @@ export default function App() {
       <Modal visible={popupVisible} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalBadge}>VAULTCALL POP-UP | {matchedCaller ? matchedCaller.source : "UNKNOWN"}</Text>
+            <Text style={styles.modalBadge}>VAULTCALL DB POP-UP | {matchedCaller ? matchedCaller.source : "UNKNOWN"}</Text>
             <Text style={styles.modalTitle}>{matchedCaller ? matchedCaller.name : "Unknown Caller"}</Text>
             <Text style={styles.phoneText}>{lookupPhone || "No Number"}</Text>
-            <Text style={styles.modalNotes}>{matchedCaller ? matchedCaller.notes || "Saved contact" : "Not in your phone or Vault extra contacts."}</Text>
+            <Text style={styles.modalNotes}>{matchedCaller ? matchedCaller.notes || "Matched in VaultCall DB" : "Not found in your VaultCall DB."}</Text>
             <View style={styles.rowGap}>
               <TouchableOpacity style={[styles.recBtn, isRecording && styles.recBtnActive]} onPress={startAudioRecording}><Text style={styles.btnText}>{isRecording ? "Stop Recording" : "Start Recording"}</Text></TouchableOpacity>
               <TouchableOpacity style={styles.secondaryBtnFlex} onPress={closeCallerPopup}><Text style={styles.btnText}>Close</Text></TouchableOpacity>
