@@ -10,8 +10,10 @@ function patchManifest(manifest) {
     "android.permission.READ_CALL_LOG",
     "android.permission.READ_CONTACTS",
     "android.permission.SYSTEM_ALERT_WINDOW",
+    "android.permission.POST_NOTIFICATIONS",
     "android.permission.FOREGROUND_SERVICE",
-    "android.permission.FOREGROUND_SERVICE_MICROPHONE"
+    "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+    "android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
   ];
   manifest.manifest["uses-permission"] = manifest.manifest["uses-permission"] || [];
   const existing = new Set(
@@ -42,6 +44,17 @@ function patchManifest(manifest) {
     }
 
     app.service = app.service || [];
+    if (!app.service.some((s) => s.$ && s.$["android:name"] === ".CallerOverlayService")) {
+      app.service.push({
+        $: {
+          "android:name": ".CallerOverlayService",
+          "android:enabled": "true",
+          "android:exported": "false",
+          "android:foregroundServiceType": "specialUse"
+        }
+      });
+    }
+
     if (!app.service.some((s) => s.$ && s.$["android:name"] === ".RecordingService")) {
       app.service.push({
         $: {
@@ -57,8 +70,12 @@ function patchManifest(manifest) {
 }
 
 function buildKotlinFiles(pkgName) {
-  const callerOverlayKt = `package ${pkgName}
+  const callerOverlayServiceKt = `package ${pkgName}
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -66,6 +83,7 @@ import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
@@ -74,87 +92,130 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.app.NotificationCompat
 
-object CallerOverlayController {
+class CallerOverlayService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var overlayView: View? = null
     private var windowManager: WindowManager? = null
 
-    fun showPopup(context: Context, number: String?, name: String, notes: String, sourceLabel: String) {
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_HIDE) {
+            removeOverlay()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        val number = intent?.getStringExtra(EXTRA_NUMBER) ?: "Unknown"
+        val name = intent?.getStringExtra(EXTRA_NAME) ?: "Unknown Caller"
+        val notes = intent?.getStringExtra(EXTRA_NOTES) ?: ""
+        val sourceLabel = intent?.getStringExtra(EXTRA_SOURCE) ?: "VaultCall"
+
+        ensureChannel()
+        startForeground(NOTIF_ID, buildNotif(name, number, sourceLabel))
+        showOverlay(number, name, notes, sourceLabel)
+        return START_STICKY
+    }
+
+    private fun showOverlay(number: String, name: String, notes: String, sourceLabel: String) {
         mainHandler.post {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(applicationContext)) {
                 return@post
             }
-            dismissPopup()
-            val wm = context.applicationContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            removeOverlay()
+            val wm = applicationContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             windowManager = wm
 
-            val card = LinearLayout(context.applicationContext).apply {
+            val card = LinearLayout(applicationContext).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(36, 30, 36, 30)
                 background = GradientDrawable().apply {
                     setColor(Color.parseColor("#0F172A"))
                     cornerRadius = 28f
-                    setStroke(3, Color.parseColor("#4F46E5"))
+                    setStroke(4, Color.parseColor("#6366F1"))
                 }
             }
 
-            val titleTv = TextView(context.applicationContext).apply {
-                text = "VaultCall - " + name
+            val badgeTv = TextView(applicationContext).apply {
+                text = "VAULTCALL LIVE CALLER ID • " + sourceLabel.uppercase()
+                setTextColor(Color.parseColor("#A5B4FC"))
+                textSize = 11f
+            }
+
+            val titleTv = TextView(applicationContext).apply {
+                text = name
                 setTextColor(Color.parseColor("#F8FAFC"))
-                textSize = 18f
+                textSize = 20f
+                setPadding(0, 4, 0, 2)
             }
 
-            val subTv = TextView(context.applicationContext).apply {
-                text = (number ?: "Unknown") + " [" + sourceLabel + "]"
-                setTextColor(Color.parseColor("#93C5FD"))
+            val subTv = TextView(applicationContext).apply {
+                text = number
+                setTextColor(Color.parseColor("#6EE7B7"))
+                textSize = 15f
+                setPadding(0, 0, 0, 8)
+            }
+
+            val notesTv = TextView(applicationContext).apply {
+                text = if (notes.isBlank()) "Saved in VaultCall / Phone Book" else notes
+                setTextColor(Color.parseColor("#E2E8F0"))
                 textSize = 13f
-                setPadding(0, 6, 0, 10)
+                setPadding(0, 0, 0, 16)
             }
 
-            val notesTv = TextView(context.applicationContext).apply {
-                text = if (notes.isBlank()) "No extra notes saved." else notes
-                setTextColor(Color.parseColor("#D1FAE5"))
-                textSize = 14f
-                setPadding(0, 0, 0, 18)
-            }
-
-            val row = LinearLayout(context.applicationContext).apply {
+            val row = LinearLayout(applicationContext).apply {
                 orientation = LinearLayout.HORIZONTAL
             }
 
-            val recBtn = Button(context.applicationContext).apply {
-                text = "Record Audio"
+            val recBtn = Button(applicationContext).apply {
+                text = "Record"
                 setBackgroundColor(Color.parseColor("#059669"))
                 setTextColor(Color.WHITE)
                 setOnClickListener {
-                    val intent = Intent(context.applicationContext, RecordingService::class.java).apply {
+                    val recIntent = Intent(applicationContext, RecordingService::class.java).apply {
                         action = RecordingService.ACTION_START
-                        putExtra(RecordingService.EXTRA_NUMBER, number ?: "Unknown")
+                        putExtra(RecordingService.EXTRA_NUMBER, number)
                         putExtra(RecordingService.EXTRA_NAME, name)
                     }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        context.applicationContext.startForegroundService(intent)
+                        applicationContext.startForegroundService(recIntent)
                     } else {
-                        context.applicationContext.startService(intent)
+                        applicationContext.startService(recIntent)
                     }
                     text = "Recording..."
                 }
             }
 
-            val closeBtn = Button(context.applicationContext).apply {
-                text = "Dismiss"
+            val closeBtn = Button(applicationContext).apply {
+                text = "Close"
                 setBackgroundColor(Color.parseColor("#334155"))
                 setTextColor(Color.WHITE)
-                setOnClickListener { dismissPopup() }
+                setOnClickListener {
+                    val stopIntent = Intent(applicationContext, CallerOverlayService::class.java).apply {
+                        action = ACTION_HIDE
+                    }
+                    applicationContext.startService(stopIntent)
+                }
             }
 
             row.addView(recBtn)
-            row.addView(closeBtn, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginStart = 16 })
+            row.addView(
+                closeBtn,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { marginStart = 16 }
+            )
 
+            card.addView(badgeTv)
             card.addView(titleTv)
             card.addView(subTv)
             card.addView(notesTv)
@@ -171,26 +232,94 @@ object CallerOverlayController {
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 flag,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON,
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                y = 80
+                x = 24
+                y = 90
+                width = WindowManager.LayoutParams.MATCH_PARENT
             }
 
-            overlayView = card
-            wm.addView(card, params)
+            try {
+                overlayView = card
+                wm.addView(card, params)
+            } catch (_: Exception) {
+                overlayView = null
+            }
         }
     }
 
-    fun dismissPopup() {
-        mainHandler.post {
-            try {
-                overlayView?.let { windowManager?.removeView(it) }
-            } catch (_: Exception) {
-            } finally {
-                overlayView = null
+    private fun removeOverlay() {
+        try {
+            overlayView?.let { windowManager?.removeView(it) }
+        } catch (_: Exception) {
+        } finally {
+            overlayView = null
+        }
+    }
+
+    private fun ensureChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val ch = NotificationChannel(
+                CHANNEL_ID,
+                "VaultCall Caller ID Pop-up",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
+        }
+    }
+
+    private fun buildNotif(name: String, number: String, sourceLabel: String): Notification {
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("VaultCall • " + name + " [" + sourceLabel + "]")
+            .setContentText(number)
+            .setSmallIcon(android.R.drawable.ic_menu_call)
+            .setOngoing(true)
+            .build()
+    }
+
+    override fun onDestroy() {
+        removeOverlay()
+        super.onDestroy()
+    }
+
+    companion object {
+        const val ACTION_SHOW = "${pkgName}.SHOW_OVERLAY"
+        const val ACTION_HIDE = "${pkgName}.HIDE_OVERLAY"
+        const val EXTRA_NUMBER = "extra_number"
+        const val EXTRA_NAME = "extra_name"
+        const val EXTRA_NOTES = "extra_notes"
+        const val EXTRA_SOURCE = "extra_source"
+        private const val CHANNEL_ID = "vaultcall_overlay_ch"
+        private const val NOTIF_ID = 3002
+
+        fun show(context: Context, number: String?, name: String, notes: String, sourceLabel: String) {
+            val intent = Intent(context.applicationContext, CallerOverlayService::class.java).apply {
+                action = ACTION_SHOW
+                putExtra(EXTRA_NUMBER, number ?: "Unknown")
+                putExtra(EXTRA_NAME, name)
+                putExtra(EXTRA_NOTES, notes)
+                putExtra(EXTRA_SOURCE, sourceLabel)
             }
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.applicationContext.startForegroundService(intent)
+                } else {
+                    context.applicationContext.startService(intent)
+                }
+            } catch (_: Exception) {}
+        }
+
+        fun hide(context: Context) {
+            val intent = Intent(context.applicationContext, CallerOverlayService::class.java).apply {
+                action = ACTION_HIDE
+            }
+            try {
+                context.applicationContext.startService(intent)
+            } catch (_: Exception) {}
         }
     }
 }
@@ -220,7 +349,12 @@ class RecordingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             stopRec()
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
             stopSelf()
             return START_NOT_STICKY
         }
@@ -317,7 +451,7 @@ class IncomingCallReceiver : BroadcastReceiver() {
         when (state) {
             TelephonyManager.EXTRA_STATE_RINGING -> {
                 val (name, notes, source) = lookupCaller(context, incoming)
-                CallerOverlayController.showPopup(context, incoming, name, notes, source)
+                CallerOverlayService.show(context, incoming, name, notes, source)
                 val prefs = context.getSharedPreferences("VaultCallNativePrefs", Context.MODE_PRIVATE)
                 if (prefs.getBoolean("auto_record", false)) {
                     val recIntent = Intent(context, RecordingService::class.java).apply {
@@ -325,18 +459,22 @@ class IncomingCallReceiver : BroadcastReceiver() {
                         putExtra(RecordingService.EXTRA_NUMBER, incoming ?: "Unknown")
                         putExtra(RecordingService.EXTRA_NAME, name)
                     }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        context.startForegroundService(recIntent)
-                    } else {
-                        context.startService(recIntent)
-                    }
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            context.startForegroundService(recIntent)
+                        } else {
+                            context.startService(recIntent)
+                        }
+                    } catch (_: Exception) {}
                 }
             }
             TelephonyManager.EXTRA_STATE_IDLE -> {
-                context.startService(Intent(context, RecordingService::class.java).apply {
-                    action = RecordingService.ACTION_STOP
-                })
-                CallerOverlayController.dismissPopup()
+                try {
+                    context.startService(Intent(context, RecordingService::class.java).apply {
+                        action = RecordingService.ACTION_STOP
+                    })
+                } catch (_: Exception) {}
+                CallerOverlayService.hide(context)
             }
         }
     }
@@ -348,7 +486,7 @@ class IncomingCallReceiver : BroadcastReceiver() {
 
     private fun lookupCaller(context: Context, phone: String?): Triple<String, String, String> {
         val target = norm(phone)
-        if (target.isEmpty()) return Triple("Unknown Caller", "", "No Number")
+        if (target.isEmpty()) return Triple("Incoming Call", "Number hidden by carrier", "Phone State")
 
         val prefs = context.getSharedPreferences("VaultCallNativePrefs", Context.MODE_PRIVATE)
         val rawExtra = prefs.getString("vault_extra_contacts", "[]") ?: "[]"
@@ -443,7 +581,12 @@ class VaultBridgeModule(private val reactCtx: ReactApplicationContext) : ReactCo
 
     @ReactMethod
     fun showNativePopup(number: String, name: String, notes: String, sourceLabel: String) {
-        CallerOverlayController.showPopup(reactCtx, number, name, notes, sourceLabel)
+        CallerOverlayService.show(reactCtx, number, name, notes, sourceLabel)
+    }
+
+    @ReactMethod
+    fun dismissNativePopup() {
+        CallerOverlayService.hide(reactCtx)
     }
 
     @ReactMethod
@@ -550,7 +693,7 @@ class VaultPackage : ReactPackage {
 `;
 
   return {
-    callerOverlayKt,
+    callerOverlayServiceKt,
     recordingServiceKt,
     incomingReceiverKt,
     vaultBridgeKt,
@@ -584,6 +727,17 @@ function registerVaultPackageInMainApp(appKt) {
       /override fun getPackages\(\): List<ReactPackage>\s*=\s*PackageList\(this\)\.packages/,
       "override fun getPackages(): List<ReactPackage> =\n        PackageList(this).packages.apply { add(VaultPackage()) }"
     );
+  } else if (updated.includes("override fun getPackages(): List<ReactPackage> =")) {
+    updated = updated.replace(
+      /override fun getPackages\(\): List<ReactPackage> =\s*PackageList\(this\)\.packages(?:\.apply\s*\{)?/,
+      "override fun getPackages(): List<ReactPackage> = PackageList(this).packages.apply {\n              add(VaultPackage())"
+    );
+    if (!updated.includes("add(VaultPackage())")) {
+      updated = updated.replace(
+        /override fun getPackages\(\): List<ReactPackage> =[^\r\n]*/,
+        "override fun getPackages(): List<ReactPackage> = PackageList(this).packages.apply { add(VaultPackage()) }"
+      );
+    }
   }
 
   return updated;
@@ -611,7 +765,7 @@ module.exports = function withVaultCallNative(config) {
       );
       fs.mkdirSync(pkgDir, { recursive: true });
       const files = buildKotlinFiles(pkgName);
-      fs.writeFileSync(path.join(pkgDir, "CallerOverlayController.kt"), files.callerOverlayKt, "utf8");
+      fs.writeFileSync(path.join(pkgDir, "CallerOverlayService.kt"), files.callerOverlayServiceKt, "utf8");
       fs.writeFileSync(path.join(pkgDir, "RecordingService.kt"), files.recordingServiceKt, "utf8");
       fs.writeFileSync(path.join(pkgDir, "IncomingCallReceiver.kt"), files.incomingReceiverKt, "utf8");
       fs.writeFileSync(path.join(pkgDir, "VaultBridgeModule.kt"), files.vaultBridgeKt, "utf8");

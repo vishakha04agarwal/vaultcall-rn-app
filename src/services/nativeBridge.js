@@ -13,9 +13,13 @@ export async function requestCallAndContactsPermissions() {
     PermissionsAndroid.PERMISSIONS.READ_CALL_LOG,
     PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
     PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-  ].filter(Boolean);
-  if (!perms.length) return false;
-  const res = await PermissionsAndroid.requestMultiple(perms);
+  ];
+  if (Platform.Version >= 33 && PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS) {
+    perms.push(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+  }
+  const activePerms = perms.filter(Boolean);
+  if (!activePerms.length) return false;
+  const res = await PermissionsAndroid.requestMultiple(activePerms);
   return Object.values(res).every((v) => v === PermissionsAndroid.RESULTS.GRANTED);
 }
 
@@ -60,6 +64,16 @@ export function triggerNativeCallerPopup(number = "", name = "Unknown Caller", n
       String(notes || ""),
       String(sourceLabel || "VaultCall")
     );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function dismissNativeCallerPopup() {
+  if (!isNativeBridgeAvailable() || typeof VaultBridge.dismissNativePopup !== "function") return false;
+  try {
+    VaultBridge.dismissNativePopup();
     return true;
   } catch {
     return false;

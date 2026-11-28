@@ -18,7 +18,7 @@ import {
 import {
   isNativeBridgeAvailable, requestCallAndContactsPermissions, checkOverlayPermission,
   openOverlayPermissionSettings, syncVaultExtraContactsToNative, triggerNativeCallerPopup,
-  fetchDevicePhoneContacts, fetchInternalCallLogs,
+  dismissNativeCallerPopup, fetchDevicePhoneContacts, fetchInternalCallLogs,
 } from "./src/services/nativeBridge";
 
 function mergeCallLogsWithRecordings(systemLogs = [], existingLogs = [], extraContacts = [], devContacts = []) {
@@ -50,6 +50,7 @@ export default function App() {
   const [backendOnline, setBackendOnline] = useState(false);
   const [tab, setTab] = useState("contacts");
   const [contactSourceFilter, setContactSourceFilter] = useState("all");
+  const [searchText, setSearchText] = useState("");
   const [profile, setProfile] = useState({ name: "Me", lang: "hi-IN" });
   const [autoRecord, setAutoRecordState] = useState(true);
   const [vaultExtraContacts, setVaultExtraContacts] = useState([]);
@@ -148,12 +149,12 @@ export default function App() {
         syncVaultExtraContactsToNative(mergedContacts, currentRec);
         await updatePendingBadge();
         const note = q.syncedContactsCount + q.syncedTranscriptsCount > 0 ? " (Queued synced)" : "";
-        setStatusText(`Online | ${mergedContacts.length} Extra + Phone${note}`);
+        setStatusText(`Online | ${mergedContacts.length} Vault + ${stateRef.current.phoneContacts.length} Phone${note}`);
       } catch {
         await updatePendingBadge();
         if (mountedRef.current) {
           setBackendOnline(false);
-          setStatusText(`Offline / Local Vault | ${health.message}`);
+          setStatusText(`Local Vault | ${currentExtra.length} Vault + ${stateRef.current.phoneContacts.length} Phone`);
         }
       }
     },
@@ -245,20 +246,32 @@ export default function App() {
       source: "Phone Book",
     }));
 
-    if (contactSourceFilter === "extra") return extraItems;
-    if (contactSourceFilter === "phone") return phoneItems;
-    return [...extraItems, ...phoneItems];
-  }, [vaultExtraContacts, phoneContacts, contactSourceFilter]);
+    const baseList =
+      contactSourceFilter === "extra"
+        ? extraItems
+        : contactSourceFilter === "phone"
+          ? phoneItems
+          : [...extraItems, ...phoneItems];
+
+    const q = searchText.trim().toLowerCase();
+    const qDigits = normalizePhone(searchText);
+    if (!q) return baseList;
+    return baseList.filter((item) => {
+      const nameMatch = (item.name || "").toLowerCase().includes(q);
+      const phoneMatch = (item.phone || "").toLowerCase().includes(q) || (qDigits && normalizePhone(item.phone).includes(qDigits));
+      return nameMatch || phoneMatch;
+    });
+  }, [vaultExtraContacts, phoneContacts, contactSourceFilter, searchText]);
 
   const handleEnablePhoneIntegration = async () => {
     await requestCallAndContactsPermissions();
     if (nativeReady) {
+      await refreshPhoneIntegration(vaultExtraContacts, autoRecord, callLogs);
       const hasOverlay = await checkOverlayPermission();
       setOverlayGranted(hasOverlay);
       if (!hasOverlay) {
         openOverlayPermissionSettings();
       }
-      await refreshPhoneIntegration(vaultExtraContacts, autoRecord, callLogs);
     }
     await syncWithBackend(apiUrl, vaultExtraContacts, autoRecord);
   };
@@ -370,17 +383,36 @@ export default function App() {
 
   const triggerCallerPopup = async (phoneVal) => {
     const num = (phoneVal ?? lookupPhone).trim();
-    setLookupPhone(num);
+    if (num) setLookupPhone(num);
     const target = normalizePhone(num);
     const extra = vaultExtraContacts.find((c) => normalizePhone(c.phone) === target);
     const dev = phoneContacts.find((c) => normalizePhone(c.phone) === target);
-    const match = extra ? { name: extra.name, notes: extra.notes || "", source: "Vault Extra" } : dev ? { name: dev.name, notes: "From your phone contacts", source: "Phone Book" } : null;
+    const match = extra
+      ? { name: extra.name, notes: extra.notes || "", source: "Vault Extra" }
+      : dev
+        ? { name: dev.name, notes: "From your phone contacts", source: "Phone Book" }
+        : null;
+
     if (nativeReady) {
       const hasOverlay = await checkOverlayPermission();
-      if (!hasOverlay) openOverlayPermissionSettings();
-      else triggerNativeCallerPopup(num, match ? match.name : "Unknown Caller", match ? match.notes : "Not in Vault or Phone Contacts", match ? match.source : "Unknown");
+      setOverlayGranted(hasOverlay);
+      if (!hasOverlay) {
+        openOverlayPermissionSettings();
+      } else {
+        triggerNativeCallerPopup(
+          num || "Unknown",
+          match ? match.name : "Unknown Caller",
+          match ? match.notes : "Not in Vault or Phone Contacts",
+          match ? match.source : "Unknown"
+        );
+      }
     }
     setPopupVisible(true);
+  };
+
+  const closeCallerPopup = () => {
+    setPopupVisible(false);
+    dismissNativeCallerPopup();
   };
 
   const callerSpeakerLabel = matchedCaller ? matchedCaller.name : lookupPhone || "Caller";
@@ -446,32 +478,41 @@ export default function App() {
           <TouchableOpacity style={styles.primaryBtn} onPress={handleSaveContact}><Text style={styles.btnText}>Save Extra Contact</Text></TouchableOpacity>
         </View>
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Caller Lookup (Vault Extra + Your Phone Book)</Text>
-          <TextInput style={styles.input} placeholder="Enter number to test lookup..." placeholderTextColor="#64748B" keyboardType="phone-pad" value={lookupPhone} onChangeText={setLookupPhone} />
+          <Text style={styles.cardTitle}>Caller Lookup & Incoming Pop-up Test</Text>
+          <TextInput style={styles.input} placeholder="Enter number to lookup / test pop-up..." placeholderTextColor="#64748B" keyboardType="phone-pad" value={lookupPhone} onChangeText={setLookupPhone} />
           <View style={styles.matchBox}>
             <Text style={styles.matchTitle}>{matchedCaller ? `${matchedCaller.name} (${matchedCaller.source})` : "Unknown Caller"}</Text>
             <Text style={styles.matchSub}>{matchedCaller ? matchedCaller.notes || "Saved contact" : "Not found in your phone or Vault extra contacts."}</Text>
           </View>
-          <TouchableOpacity style={styles.secondaryBtn} onPress={() => triggerCallerPopup(lookupPhone)}><Text style={styles.btnText}>Show Call Pop-up</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.secondaryBtn} onPress={() => triggerCallerPopup(lookupPhone)}><Text style={styles.btnText}>Show Truecaller-Style Pop-up</Text></TouchableOpacity>
         </View>
-        <View style={styles.rowGap}>
-          {[
-            ["all", `All (${vaultExtraContacts.length + phoneContacts.length})`],
-            ["extra", `Vault (${vaultExtraContacts.length})`],
-            ["phone", `Phone (${phoneContacts.length})`],
-          ].map(([key, label]) => (
-            <TouchableOpacity
-              key={key}
-              style={[styles.speakerChip, contactSourceFilter === key && styles.speakerChipActive]}
-              onPress={() => setContactSourceFilter(key)}
-            >
-              <Text style={styles.btnText}>{label}</Text>
-            </TouchableOpacity>
-          ))}
+        <View style={styles.card}>
+          <TextInput
+            style={styles.input}
+            placeholder="Search saved or phone contacts by name/number..."
+            placeholderTextColor="#64748B"
+            value={searchText}
+            onChangeText={setSearchText}
+          />
+          <View style={styles.rowGap}>
+            {[
+              ["all", `All (${vaultExtraContacts.length + phoneContacts.length})`],
+              ["extra", `Vault (${vaultExtraContacts.length})`],
+              ["phone", `Phone (${phoneContacts.length})`],
+            ].map(([key, label]) => (
+              <TouchableOpacity
+                key={key}
+                style={[styles.speakerChip, contactSourceFilter === key && styles.speakerChipActive]}
+                onPress={() => setContactSourceFilter(key)}
+              >
+                <Text style={styles.btnText}>{label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
         </View>
       </View>
     ),
-    [nameInput, phoneInput, tagInput, notesInput, lookupPhone, matchedCaller, vaultExtraContacts.length, phoneContacts.length, contactSourceFilter]
+    [nameInput, phoneInput, tagInput, notesInput, lookupPhone, matchedCaller, searchText, vaultExtraContacts.length, phoneContacts.length, contactSourceFilter]
   );
 
   const transcriptsHeader = useMemo(
@@ -529,7 +570,7 @@ export default function App() {
       </View>
       <View style={styles.permBanner}>
         <Text style={styles.permText}>
-          {nativeReady ? `Phone Contacts: ${phoneContacts.length} | Overlay: ${overlayGranted ? "ON" : "OFF"}` : `Native Bridge: Ready | Phone Contacts: ${phoneContacts.length}`}
+          {`Vault: ${vaultExtraContacts.length} | Phone: ${phoneContacts.length} | Overlay: ${overlayGranted ? "ON" : "OFF"}`}
         </Text>
         <TouchableOpacity style={styles.smallBtn} onPress={handleEnablePhoneIntegration}>
           <Text style={styles.smallBtnText}>Sync & Allow</Text>
@@ -551,7 +592,7 @@ export default function App() {
           ListHeaderComponent={contactsHeader}
           ListEmptyComponent={
             <View style={styles.card}>
-              <Text style={styles.matchSub}>No contacts in this view yet. Tap Sync & Allow to load Phone Contacts.</Text>
+              <Text style={styles.matchSub}>No contacts found. Tap Sync & Allow to load Phone Contacts or add a Vault contact above.</Text>
             </View>
           }
           contentContainerStyle={styles.content}
@@ -603,6 +644,7 @@ export default function App() {
             <View style={styles.card}>
               <Text style={styles.cardTitle}>Phone Integration & Backend Settings</Text>
               <TouchableOpacity style={styles.secondaryBtn} onPress={handleEnablePhoneIntegration}><Text style={styles.btnText}>Grant Call, Contacts & Overlay Permissions</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.secondaryBtn} onPress={() => openOverlayPermissionSettings()}><Text style={styles.btnText}>Open Display Over Other Apps Settings</Text></TouchableOpacity>
               <Text style={styles.label}>Backend URL</Text>
               <TextInput style={styles.input} value={apiUrl} onChangeText={setApiUrlState} placeholder="https://vault-backend-t9nu.onrender.com" placeholderTextColor="#64748B" />
               <Text style={styles.label}>Your Speaker Name</Text>
@@ -623,7 +665,7 @@ export default function App() {
             <Text style={styles.modalNotes}>{matchedCaller ? matchedCaller.notes || "Saved contact" : "Not in your phone or Vault extra contacts."}</Text>
             <View style={styles.rowGap}>
               <TouchableOpacity style={[styles.recBtn, isRecording && styles.recBtnActive]} onPress={startAudioRecording}><Text style={styles.btnText}>{isRecording ? "Stop Recording" : "Start Recording"}</Text></TouchableOpacity>
-              <TouchableOpacity style={styles.secondaryBtnFlex} onPress={() => setPopupVisible(false)}><Text style={styles.btnText}>Close</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.secondaryBtnFlex} onPress={closeCallerPopup}><Text style={styles.btnText}>Close</Text></TouchableOpacity>
             </View>
           </View>
         </View>
