@@ -15,9 +15,10 @@ import {
   flushPendingQueue,
 } from "./src/services/storage";
 import {
-  isNativeBridgeAvailable, requestCallAndContactsPermissions, checkOverlayPermission,
-  openOverlayPermissionSettings, syncVaultExtraContactsToNative, triggerNativeCallerPopup,
-  dismissNativeCallerPopup, fetchDevicePhoneContacts, fetchInternalCallLogs,
+  isNativeBridgeAvailable, getNativeDiagnostics, requestCallAndContactsPermissions,
+  checkOverlayPermission, openOverlayPermissionSettings, openPhoneAppDetailsSettings,
+  syncVaultExtraContactsToNative, triggerNativeCallerPopup, dismissNativeCallerPopup,
+  fetchDevicePhoneContacts, fetchInternalCallLogs,
 } from "./src/services/nativeBridge";
 
 function mergeCallLogs(systemLogs = [], existingLogs = [], dbContacts = []) {
@@ -44,6 +45,7 @@ function mergeCallLogs(systemLogs = [], existingLogs = [], dbContacts = []) {
 export default function App() {
   const [apiUrl, setApiUrlState] = useState(DEFAULT_BACKEND_URL);
   const [statusText, setStatusText] = useState("Connecting to VaultCall DB...");
+  const [diagText, setDiagText] = useState("Checking NativeBridge...");
   const [backendOnline, setBackendOnline] = useState(false);
   const [tab, setTab] = useState("contacts");
   const [contactFilter, setContactFilter] = useState("all");
@@ -54,6 +56,7 @@ export default function App() {
   const [transcripts, setTranscripts] = useState([]);
   const [callLogs, setCallLogs] = useState([]);
   const [overlayGranted, setOverlayGranted] = useState(false);
+  const [nativeReady, setNativeReady] = useState(isNativeBridgeAvailable());
   const [pendingCount, setPendingCount] = useState(0);
   const [nameInput, setNameInput] = useState("");
   const [phoneInput, setPhoneInput] = useState("");
@@ -76,8 +79,6 @@ export default function App() {
     stateRef.current = { apiUrl, dbContacts, callLogs, autoRecord };
   }, [apiUrl, dbContacts, callLogs, autoRecord]);
 
-  const nativeReady = isNativeBridgeAvailable();
-
   const updatePendingBadge = useCallback(async () => {
     const [pc, pt] = await Promise.all([getPendingContacts(), getPendingTranscripts()]);
     if (mountedRef.current) setPendingCount(pc.length + pt.length);
@@ -89,13 +90,29 @@ export default function App() {
     let workingContacts = currentContacts ?? stateRef.current.dbContacts;
     let workingLogs = currentLogs ?? stateRef.current.callLogs;
 
-    const hasOverlay = await checkOverlayPermission();
-    if (mountedRef.current) setOverlayGranted(hasOverlay);
+    const diag = await getNativeDiagnostics();
+    if (mountedRef.current) {
+      setNativeReady(diag.bridge);
+      setOverlayGranted(diag.overlay);
+      setDiagText(
+        `Bridge:${diag.bridge ? "OK" : "NO"} | ContactsPerm:${diag.contactsPerm ? "OK" : "NO"} | CallLogPerm:${diag.callLogPerm ? "OK" : "NO"} | Overlay:${diag.overlay ? "ON" : "OFF"}`
+      );
+    }
 
-    let devContacts = [], devLogs = [];
-    if (nativeReady) {
-      try { devContacts = await fetchDevicePhoneContacts(); } catch {}
-      try { devLogs = await fetchInternalCallLogs(); } catch {}
+    let devContacts = [];
+    let devLogs = [];
+    let readErr = "";
+
+    if (diag.bridge) {
+      const cRes = await fetchDevicePhoneContacts();
+      devContacts = cRes.contacts;
+      if (cRes.error) readErr = cRes.error;
+
+      const lRes = await fetchInternalCallLogs();
+      devLogs = lRes.logs;
+      if (!readErr && lRes.error) readErr = lRes.error;
+    } else {
+      readErr = diag.reason;
     }
 
     const health = await checkBackendHealth(cleanUrl);
@@ -103,13 +120,21 @@ export default function App() {
 
     try {
       await flushPendingQueue(cleanUrl);
-      if (devContacts.length > 0) await syncPhoneContactsToDatabase(cleanUrl, devContacts);
+      if (devContacts.length > 0) {
+        await syncPhoneContactsToDatabase(cleanUrl, devContacts);
+      }
       const remoteContacts = await fetchContactsRemote(cleanUrl);
       if (remoteContacts.length > 0) {
         workingContacts = remoteContacts;
         await saveCachedContacts(workingContacts);
       } else if (devContacts.length > 0) {
-        workingContacts = devContacts.map((c, idx) => ({ id: `phone_${idx}_${normalizePhone(c.phone)}`, name: c.name, phone: c.phone, tag: "Phone Book", notes: "From your phone contacts" }));
+        workingContacts = devContacts.map((c, idx) => ({
+          id: `phone_${idx}_${normalizePhone(c.phone)}`,
+          name: c.name,
+          phone: c.phone,
+          tag: "Phone Book",
+          notes: "From your phone contacts",
+        }));
         await saveCachedContacts(workingContacts);
       }
 
@@ -119,23 +144,38 @@ export default function App() {
         await saveCallLogs(workingLogs);
       } else {
         const remoteLogs = await fetchCallLogsRemote(cleanUrl);
-        if (remoteLogs.length > 0) { workingLogs = remoteLogs; await saveCallLogs(workingLogs); }
+        if (remoteLogs.length > 0) {
+          workingLogs = remoteLogs;
+          await saveCallLogs(workingLogs);
+        }
       }
 
       const remoteT = await fetchTranscriptsRemote(cleanUrl);
       if (!mountedRef.current) return;
-      setDbContacts(workingContacts); setCallLogs(workingLogs); setTranscripts(remoteT); setBackendOnline(true);
+      setDbContacts(workingContacts);
+      setCallLogs(workingLogs);
+      setTranscripts(remoteT);
+      setBackendOnline(true);
       await saveCachedTranscripts(remoteT);
       syncVaultExtraContactsToNative(workingContacts, currentRec);
       await updatePendingBadge();
-      setStatusText(`DB Connected | ${workingContacts.length} Contacts | ${workingLogs.length} Logs`);
-    } catch {
+      const extraInfo = readErr ? ` (${readErr})` : ` (Phone:${devContacts.length})`;
+      setStatusText(`DB Connected | ${workingContacts.length} Contacts | ${workingLogs.length} Logs${extraInfo}`);
+    } catch (err) {
       if (devContacts.length > 0) {
         const map = new Map();
         for (const c of workingContacts) map.set(`${normalizePhone(c.phone)}_${c.tag || "Vault"}`, c);
         for (const dc of devContacts) {
           const k = `${normalizePhone(dc.phone)}_Phone Book`;
-          if (!map.has(k)) map.set(k, { id: `phone_${normalizePhone(dc.phone)}_${map.size}`, name: dc.name, phone: dc.phone, tag: "Phone Book", notes: "From your phone contacts" });
+          if (!map.has(k)) {
+            map.set(k, {
+              id: `phone_${normalizePhone(dc.phone)}_${map.size}`,
+              name: dc.name,
+              phone: dc.phone,
+              tag: "Phone Book",
+              notes: "From your phone contacts",
+            });
+          }
         }
         workingContacts = Array.from(map.values());
         await saveCachedContacts(workingContacts);
@@ -146,11 +186,13 @@ export default function App() {
       }
       await updatePendingBadge();
       if (!mountedRef.current) return;
-      setDbContacts(workingContacts); setCallLogs(workingLogs); setBackendOnline(false);
+      setDbContacts(workingContacts);
+      setCallLogs(workingLogs);
+      setBackendOnline(false);
       syncVaultExtraContactsToNative(workingContacts, currentRec);
-      setStatusText(`Local DB | ${workingContacts.length} Contacts | ${workingLogs.length} Logs`);
+      setStatusText(`Local DB | ${workingContacts.length} Contacts (${err?.message || readErr || "Offline"})`);
     }
-  }, [nativeReady, updatePendingBadge]);
+  }, [updatePendingBadge]);
 
   const syncEngineRef = useRef(null);
   if (!syncEngineRef.current) {
@@ -220,13 +262,26 @@ export default function App() {
 
   const handleSyncAndAllow = useCallback(async () => {
     await requestCallAndContactsPermissions();
-    if (nativeReady) {
-      const hasOverlay = await checkOverlayPermission();
-      setOverlayGranted(hasOverlay);
-      if (!hasOverlay) openOverlayPermissionSettings();
+    const diag = await getNativeDiagnostics();
+    if (!diag.bridge) {
+      Alert.alert(
+        "Native Bridge Not Loaded",
+        "VaultBridge native module is not in this APK. Ensure GitHub Actions runs expo prebuild (or clean android build) so withVaultCallNative patches MainApplication.kt."
+      );
+    } else if (!diag.overlay) {
+      Alert.alert(
+        "Overlay Permission Needed",
+        "To show caller pop-up over incoming calls, enable Display over other apps (and Allow restricted settings under 3 dots if needed)."
+      );
+      openOverlayPermissionSettings();
     }
-    await syncDeviceAndDatabase(apiUrl, dbContacts, autoRecord, callLogs);
-  }, [nativeReady, syncDeviceAndDatabase, apiUrl, dbContacts, autoRecord, callLogs]);
+    await syncDeviceAndDatabase(
+      stateRef.current.apiUrl,
+      stateRef.current.dbContacts,
+      stateRef.current.autoRecord,
+      stateRef.current.callLogs
+    );
+  }, [syncDeviceAndDatabase]);
 
   const handleSaveContact = useCallback(async () => {
     if (!nameInput.trim() || normalizePhone(phoneInput).length < 5) {
@@ -323,11 +378,16 @@ export default function App() {
     if (num) setLookupPhone(num);
     const target = normalizePhone(num);
     const match = dbContacts.find((c) => normalizePhone(c.phone) === target);
-    if (nativeReady) {
+    const nativeStarted = triggerNativeCallerPopup(
+      num || "Unknown",
+      match ? match.name : "Unknown Caller",
+      match ? match.notes || "Matched in VaultCall DB" : "Not in your VaultCall DB",
+      match ? match.tag || "VaultCall DB" : "VaultCall DB"
+    );
+    if (!nativeStarted && nativeReady) {
       const hasOverlay = await checkOverlayPermission();
       setOverlayGranted(hasOverlay);
       if (!hasOverlay) openOverlayPermissionSettings();
-      else triggerNativeCallerPopup(num || "Unknown", match ? match.name : "Unknown Caller", match ? match.notes || "Matched in VaultCall DB" : "Not in your VaultCall DB", match ? match.tag || "VaultCall DB" : "VaultCall DB");
     }
     setPopupVisible(true);
   }, [lookupPhone, dbContacts, nativeReady]);
@@ -441,7 +501,10 @@ export default function App() {
         <TouchableOpacity style={styles.popupTriggerBtn} onPress={() => triggerCallerPopup(lookupPhone)}><Text style={styles.popupTriggerText}>Test Pop-up</Text></TouchableOpacity>
       </View>
       <View style={styles.permBanner}>
-        <Text style={styles.permText}>{`DB Contacts: ${dbContacts.length} | Logs: ${callLogs.length} | Overlay: ${overlayGranted ? "ON" : "OFF"}`}</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.permText}>{`DB Contacts: ${dbContacts.length} | Logs: ${callLogs.length} | Overlay: ${overlayGranted ? "ON" : "OFF"}`}</Text>
+          <Text style={[styles.diagText, !nativeReady && styles.statusOffline]}>{diagText}</Text>
+        </View>
         <TouchableOpacity style={styles.smallBtn} onPress={handleSyncAndAllow}><Text style={styles.smallBtnText}>Sync & Allow</Text></TouchableOpacity>
       </View>
       <View style={styles.tabBar}>
@@ -459,6 +522,7 @@ export default function App() {
             <Text style={styles.cardTitle}>VaultCall DB & Phone Settings</Text>
             <TouchableOpacity style={styles.secondaryBtn} onPress={handleSyncAndAllow}><Text style={styles.btnText}>Sync Phone Book & Logs to DB + Permissions</Text></TouchableOpacity>
             <TouchableOpacity style={styles.secondaryBtn} onPress={() => openOverlayPermissionSettings()}><Text style={styles.btnText}>Open Display Over Other Apps Settings</Text></TouchableOpacity>
+            <TouchableOpacity style={styles.secondaryBtn} onPress={() => openPhoneAppDetailsSettings()}><Text style={styles.btnText}>Open VaultCall App Info Settings</Text></TouchableOpacity>
             <Text style={styles.label}>Backend URL</Text>
             <TextInput style={styles.input} value={apiUrl} onChangeText={setApiUrlState} placeholder="https://vault-backend-t9nu.onrender.com" placeholderTextColor="#64748B" />
             <Text style={styles.label}>Your Speaker Name</Text>
@@ -494,7 +558,8 @@ const styles = StyleSheet.create({
   status: { color: "#6EE7B7", fontSize: 12, marginTop: 2 },
   statusOffline: { color: "#FBBF24" },
   permBanner: { paddingHorizontal: 16, paddingVertical: 8, backgroundColor: "#0F172A", borderBottomWidth: 1, borderBottomColor: "#1E293B", flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8 },
-  permText: { flex: 1, color: "#CBD5E1", fontSize: 12 },
+  permText: { color: "#CBD5E1", fontSize: 12 },
+  diagText: { color: "#93C5FD", fontSize: 11, marginTop: 2 },
   popupTriggerBtn: { backgroundColor: "#4F46E5", paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10 },
   popupTriggerText: { color: "#FFFFFF", fontWeight: "700", fontSize: 12 },
   tabBar: { flexDirection: "row", paddingHorizontal: 12, paddingVertical: 8, gap: 6, borderBottomWidth: 1, borderBottomColor: "#1E293B" },
