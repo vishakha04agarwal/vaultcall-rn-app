@@ -1,5 +1,4 @@
 import { Linking, NativeModules, PermissionsAndroid, Platform } from "react-native";
-import * as Contacts from "expo-contacts";
 
 const { VaultBridge } = NativeModules;
 
@@ -9,9 +8,6 @@ export function isNativeBridgeAvailable() {
 
 export async function requestCallAndContactsPermissions() {
   if (Platform.OS !== "android") return false;
-  try {
-    await Contacts.requestPermissionsAsync();
-  } catch {}
   const perms = [
     PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE,
     PermissionsAndroid.PERMISSIONS.READ_CALL_LOG,
@@ -64,30 +60,10 @@ export function dismissNativeCallerPopup() {
 }
 
 export async function fetchDevicePhoneContacts() {
-  if (isNativeBridgeAvailable() && typeof VaultBridge.getPhoneContacts === "function") {
-    try {
-      const list = await VaultBridge.getPhoneContacts();
-      if (Array.isArray(list) && list.length > 0) return list;
-    } catch {}
-  }
+  if (!isNativeBridgeAvailable() || typeof VaultBridge.getPhoneContacts !== "function") return [];
   try {
-    const { status } = await Contacts.requestPermissionsAsync();
-    if (status !== "granted") return [];
-    const { data } = await Contacts.getContactsAsync({ fields: [Contacts.Fields.PhoneNumbers] });
-    const out = [];
-    const seen = new Set();
-    for (const c of data || []) {
-      const name = (c?.name || "").trim();
-      for (const p of c?.phoneNumbers || []) {
-        const phone = (p?.number || "").trim();
-        const key = `${name}|${phone}`;
-        if (phone && !seen.has(key)) {
-          seen.add(key);
-          out.push({ name: name || phone, phone });
-        }
-      }
-    }
-    return out;
+    const list = await VaultBridge.getPhoneContacts();
+    return Array.isArray(list) ? list : [];
   } catch {
     return [];
   }
@@ -95,5 +71,10 @@ export async function fetchDevicePhoneContacts() {
 
 export async function fetchInternalCallLogs() {
   if (!isNativeBridgeAvailable() || typeof VaultBridge.getInternalCallLogs !== "function") return [];
-  try { const list = await VaultBridge.getInternalCallLogs(); return Array.isArray(list) ? list : []; } catch { return []; }
+  try {
+    const list = await VaultBridge.getInternalCallLogs();
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
 }
